@@ -7,12 +7,14 @@ import {
   Get,
   UseGuards,
   Request,
+  Put,
 } from "@nestjs/common";
 import { AuthService } from "./auth.service";
 import { Response } from "express";
 import { AuthGuard } from "@nestjs/passport";
 import { JwtPayload } from "./types/jwt-payload.interface";
 import { CurrentUser } from "src/common/current-user.decorator";
+import { User } from "src/user/user.schema";
 
 @Controller("auth")
 export class AuthController {
@@ -50,7 +52,13 @@ export class AuthController {
 
   @Get("getProfile")
   @UseGuards(AuthGuard("jwt"))
-  getProfile(@CurrentUser() user: JwtPayload) {
-    return this.authService.getProfile(user);
+  getProfile(@CurrentUser() req: JwtPayload) {
+    return this.authService.getProfile(req);
+  }
+
+  @Put("update")
+  @UseGuards(AuthGuard("jwt"))
+  update(@CurrentUser() req: JwtPayload, @Body() body: Partial<User>) {
+    return this.authService.update(req, body);
   }
 }

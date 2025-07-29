@@ -28,6 +28,7 @@
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.0.1",
     "bcryptjs": "^3.0.2",
+    "class-validator": "^0.14.2",
     "cookie-parser": "^1.4.7",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.16.5",

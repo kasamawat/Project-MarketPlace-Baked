@@ -60,35 +60,56 @@ export class AuthService {
     password: string;
   }) {
     const user = await this.userModel.findOne({
-      $or: [{ email: identifier }, { username: identifier }],
+      $or: [{ email: identifier }, { phone: identifier }],
     });
 
     if (!user || !(await bcrypt.compare(password, user.password))) {
       throw new UnauthorizedException("Invalid credentials");
     }
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET!, {
-      expiresIn: "7d",
-    }) as string;
+    const token = jwt.sign(
+      { userId: user._id, username: user.username, email: user.email },
+      process.env.JWT_SECRET!,
+      {
+        expiresIn: "7d",
+      },
+    );
 
     return { token };
   }
 
   async getProfile(payload: JwtPayload) {
-    console.log(payload,"payload");
-    
     const user = await this.userModel.findOne({ _id: payload.userId }).lean();
 
     if (!user) {
       throw new NotFoundException("User not found");
     }
 
-    const profile = {
-      userId: user._id,
-      username: user.username,
-      email: user.email,
-    };
+    return { user };
+  }
 
-    return { user: profile };
+  async update(
+    payload: JwtPayload,
+    updateData: Partial<User>,
+  ): Promise<{ message: string }> {
+    const result = await this.userModel.findByIdAndUpdate(
+      payload.userId,
+      {
+        $set: {
+          firstname: updateData.firstname,
+          lastname: updateData.lastname,
+          gender: updateData.gender,
+          dob: updateData.dob,
+          editedAt: new Date(),
+        },
+      },
+      { new: true }, // ✅ return document หลังอัปเดต
+    );
+
+    if (!result) {
+      throw new NotFoundException("User not found");
+    }
+
+    return { message: "Profile updated successfully" };
   }
 }

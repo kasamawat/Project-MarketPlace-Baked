@@ -4,6 +4,7 @@ import { Injectable } from "@nestjs/common";
 import { PassportStrategy } from "@nestjs/passport";
 import { ExtractJwt, Strategy } from "passport-jwt";
 import { Request } from "express";
+import { JwtPayload } from "jsonwebtoken";
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -23,10 +24,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  validate(payload: any) {
-    return {
-      userId: payload.id, // ตรงกับสิ่งที่คุณ sign มาตอน login
-      email: payload.email,
-    };
+  validate(payload: JwtPayload) {
+    return payload;
   }
 }
