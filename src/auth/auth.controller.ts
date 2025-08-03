@@ -18,7 +18,7 @@ import { User } from "src/user/user.schema";
 
 @Controller("auth")
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(private authService: AuthService) { }
 
   @Post("register")
   register(
@@ -32,7 +32,7 @@ export class AuthController {
     @Body() body: { identifier: string; password: string },
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { token } = await this.authService.login(body);
+    const token = await this.authService.login(body);
 
     res.cookie("token", token, {
       httpOnly: true,

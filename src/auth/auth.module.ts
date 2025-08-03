@@ -7,6 +7,7 @@ import { UserModule } from "src/user/user.module";
 import { PassportModule } from "@nestjs/passport";
 import { JwtModule } from "@nestjs/jwt";
 import { JwtStrategy } from "./strategies/jwt.strategy";
+import { Store, StoreSchema } from "src/store/store.schema";
 
 @Module({
   imports: [
@@ -15,10 +16,13 @@ import { JwtStrategy } from "./strategies/jwt.strategy";
       secret: process.env.JWT_SECRET || "defaultSecret",
       signOptions: { expiresIn: "7d" },
     }),
-    MongooseModule.forFeature([{ name: User.name, schema: UserSchema }]), // 👈 เพิ่มตรงนี้
+    MongooseModule.forFeature([
+      { name: User.name, schema: UserSchema },
+      { name: Store.name, schema: StoreSchema },
+    ]), // 👈 เพิ่มตรงนี้
     UserModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],
 })
-export class AuthModule {}
+export class AuthModule { }

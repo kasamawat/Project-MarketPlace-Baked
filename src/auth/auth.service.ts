@@ -12,10 +12,14 @@ import { Model } from "mongoose";
 import { User, UserDocument } from "src/user/user.schema";
 import { Request } from "express";
 import { JwtPayload } from "./types/jwt-payload.interface";
+import { Store } from "src/store/store.schema";
 
 @Injectable()
 export class AuthService {
-  constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
+  constructor(
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Store.name) private storeModel: Model<Store>,
+  ) {}
 
   async register({
     username,
@@ -67,15 +71,23 @@ export class AuthService {
       throw new UnauthorizedException("Invalid credentials");
     }
 
+    // ดึง store จาก user._id (ownerId)
+    const store = await this.storeModel.findOne({ ownerId: user._id });
+
     const token = jwt.sign(
-      { userId: user._id, username: user.username, email: user.email },
+      {
+        userId: user._id,
+        username: user.username,
+        email: user.email,
+        storeId: store?._id ?? null,
+      },
       process.env.JWT_SECRET!,
       {
         expiresIn: "7d",
       },
     );
 
-    return { token };
+    return token;
   }
 
   async getProfile(payload: JwtPayload) {
