@@ -25,4 +25,4 @@ import { Store, StoreSchema } from "src/store/store.schema";
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],
 })
-export class AuthModule { }
+export class AuthModule {}
