@@ -11,12 +11,14 @@ import {
 } from "@nestjs/common";
 
 import { CreateProductDto } from "./dto/create-product.dto";
-import { UpdateProductDto } from "./dto/update-product.dto";
+import {
+  UpdateProductDto,
+  UpdateProductVariantDto,
+} from "./dto/update-product.dto";
 import { ProductService } from "./products.service";
 import { AuthGuard } from "@nestjs/passport";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
 import { CurrentUser } from "src/common/current-user.decorator";
-import { ProductVariant } from "./product.schema";
 
 @Controller("products")
 export class ProductController {
@@ -24,46 +26,62 @@ export class ProductController {
 
   @Post()
   @UseGuards(AuthGuard("jwt"))
-  create(@Body() dto: CreateProductDto, @CurrentUser() req: JwtPayload) {
-    return this.productService.create(dto, req);
+  createProduct(@Body() dto: CreateProductDto, @CurrentUser() req: JwtPayload) {
+    return this.productService.createProduct(dto, req);
   }
 
   @Get()
   @UseGuards(AuthGuard("jwt"))
-  findAll(@Query() query: Record<string, any>, @CurrentUser() req: JwtPayload) {
-    return this.productService.findAll(query, req);
+  findAllProduct(
+    @Query() query: Record<string, any>,
+    @CurrentUser() req: JwtPayload,
+  ) {
+    return this.productService.findAllProduct(query, req);
   }
 
-  @Get(":id")
+  @Get(":productId")
   @UseGuards(AuthGuard("jwt"))
-  findOne(@Param("id") id: string) {
-    return this.productService.findOne(id);
+  findOneProduct(@Param("productId") productId: string) {
+    return this.productService.findOneProduct(productId);
   }
 
-  @Put(":id")
+  @Put(":productId")
   @UseGuards(AuthGuard("jwt"))
-  update(
-    @Param("id") id: string,
+  updateProduct(
+    @Param("productId") productId: string,
     @Body() dto: UpdateProductDto,
     @CurrentUser() req: JwtPayload,
   ) {
-    return this.productService.update(id, dto, req);
+    return this.productService.updateProduct(productId, dto, req);
   }
 
-  @Delete(":id")
+  @Delete(":productId")
   @UseGuards(AuthGuard("jwt"))
-  remove(@Param("id") id: string) {
-    return this.productService.remove(id);
+  removeProduct(
+    @Param("productId") productId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productService.removeProduct(productId, user);
   }
 
   @Put(":productId/variant")
   @UseGuards(AuthGuard("jwt"))
   async updateVariant(
     @Param("productId") productId: string,
-    @Body("variant") variant: ProductVariant,
+    @Body("variant") variantDto: UpdateProductVariantDto,
     @CurrentUser() user: JwtPayload,
   ) {
     // ส่งไป service
-    return this.productService.updateVariant(productId, variant, user);
+    return this.productService.updateVariant(productId, variantDto, user);
+  }
+
+  @Delete(":productId/variant/:variantId")
+  @UseGuards(AuthGuard("jwt"))
+  async removeVariant(
+    @Param("productId") productId: string,
+    @Param("variantId") variantId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productService.removeVariant(productId, variantId, user);
   }
 }

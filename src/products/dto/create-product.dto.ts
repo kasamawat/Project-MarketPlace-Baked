@@ -54,7 +54,7 @@ export class CreateProductDto {
   stock?: number;
 
   @IsString()
-  storeId: string;
+  storeId: Types.ObjectId | string;
 
   @IsOptional()
   variants?: CreateProductVariantDto[]; // ควร define type ให้ละเอียดขึ้น

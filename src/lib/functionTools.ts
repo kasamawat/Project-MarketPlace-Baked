@@ -9,23 +9,26 @@ import { ProductVariant } from "src/products/product.schema";
 export function assignIdsToVariants(variants: ProductVariant[]) {
   if (!Array.isArray(variants)) return;
   variants.forEach((v) => {
-    if (!v._id) v._id = new Types.ObjectId();
+    if (!v._id) {
+      v._id = new Types.ObjectId();
+    } else {
+      v._id = new Types.ObjectId(v._id);
+    }
     if (Array.isArray(v.variants)) assignIdsToVariants(v.variants);
   });
 }
 
 /**
- * อัปเดท variant ที่อยู่ใน tree (recursively)
- * @param tree   ต้นไม้ของ variants
- * @param update variant ที่ต้องการอัปเดท (ต้องมี _id)
- * @returns true ถ้าเจอและอัปเดทสำเร็จ, false ถ้าไม่เจอ
+ * update variant in tree (recursive + best practice for Mongoose)
+ * - อัปเดตเฉพาะฟิลด์ที่มีใน update
+ * - ลบฟิลด์ออกถ้าไม่มีใน update (เลือก field ที่ต้องการลบ)
+ * - MUTATE object เดิมเท่านั้น
  */
 export function updateVariantInTree(
   tree: ProductVariant[] | undefined,
   update: ProductVariant,
 ): boolean {
   if (!Array.isArray(tree) || !update._id) return false;
-
   const targetId = update._id.toString();
 
   for (let i = 0; i < tree.length; i++) {
@@ -33,17 +36,62 @@ export function updateVariantInTree(
     const nodeId = node._id?.toString();
 
     if (nodeId === targetId) {
-      // merge (อยากเลือก merge แบบ deep/ตื้น เลือกเอา)
-      tree[i] = { ...node, ...update };
+      // === 1. Mutate field ที่มีใน update ===
+      (
+        ["name", "value", "image", "price", "stock", "variants"] as const
+      ).forEach((k) => {
+        if (update[k] !== undefined) {
+          // @ts-expect-error: dynamic key, safe by runtime type
+          node[k] = update[k];
+        } else {
+          delete node[k];
+        }
+      });
+
+      // === 2. ลบ field ที่ไม่มีใน update (เลือก field ที่อยากลบ) ===
+      // เช่นถ้า update ไม่ส่ง variants มาเลย จะ remove node.variants ออก
+      // (ถ้าไม่อยากลบ field บางตัว ไม่ต้องลบ)
+
       return true;
     }
 
+    // === 3. Recursive ลง sub-variants ===
     if (Array.isArray(node.variants) && node.variants.length > 0) {
-      // recursion ลง sub-variant
-      if (updateVariantInTree(node.variants, update)) {
-        return true;
-      }
+      if (updateVariantInTree(node.variants, update)) return true;
     }
   }
   return false;
+}
+
+/** ลบ variant ตาม _id (recursive) */
+export function removeVariantInTree(
+  tree: ProductVariant[] = [],
+  targetId: string,
+): ProductVariant[] {
+  return tree
+    .map((v) => {
+      // ลบใน sub-variant ก่อน (ถ้ามี)
+      const newVariants = v.variants
+        ? removeVariantInTree(v.variants, targetId)
+        : [];
+      // ถ้าตัวนี้เป็น target ให้ return null (จะถูก filter ทิ้งด้านล่าง)
+      if (v._id?.toString() === targetId) return null;
+
+      // ถ้า sub-variants หมดแล้ว
+      if (!newVariants || newVariants.length === 0) {
+        return {
+          ...v,
+          variants: [],
+          price: 0,
+          stock: 0,
+          image: "",
+        };
+      }
+      // ยังเหลือ sub-variants
+      return {
+        ...v,
+        variants: newVariants,
+      };
+    })
+    .filter(Boolean) as ProductVariant[];
 }
