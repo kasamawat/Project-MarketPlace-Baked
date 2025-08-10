@@ -1,5 +1,9 @@
 // src/lib/assignIdsToVariants.ts
 import { Types } from "mongoose";
+import {
+  PublicProductStoreDto,
+  PublicProductVariantDto,
+} from "src/products/dto/public-product-response.dto";
 import { ProductVariant } from "src/products/product.schema";
 
 /**
@@ -94,4 +98,44 @@ export function removeVariantInTree(
       };
     })
     .filter(Boolean) as ProductVariant[];
+}
+
+// 1. Type guard สำหรับ store
+export function isPopulatedStore(
+  store: unknown,
+): store is PublicProductStoreDto {
+  return (
+    !!store &&
+    typeof store === "object" &&
+    "name" in store &&
+    "slug" in store &&
+    "_id" in store
+  );
+}
+
+// 2. Mapper ช่วยแปลง store เป็น DTO
+export function mapStoreToDto(store: any): PublicProductStoreDto | undefined {
+  if (!isPopulatedStore(store)) return undefined;
+  return {
+    _id: String(store._id),
+    name: store.name,
+    slug: store.slug,
+    logoUrl: store.logoUrl ?? "",
+  };
+}
+
+export function mapVariantToDto(
+  variant: ProductVariant,
+): PublicProductVariantDto {
+  return {
+    _id: String(variant._id ?? ""),
+    name: variant.name,
+    value: variant.value,
+    image: variant.image,
+    price: variant.price,
+    stock: variant.stock,
+    variants: Array.isArray(variant.variants)
+      ? variant.variants.map(mapVariantToDto)
+      : [],
+  };
 }

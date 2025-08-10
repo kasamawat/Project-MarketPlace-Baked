@@ -14,9 +14,12 @@ import {
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
 import {
   assignIdsToVariants,
+  mapStoreToDto,
+  mapVariantToDto,
   removeVariantInTree,
   updateVariantInTree,
 } from "src/lib/functionTools";
+import { PublicProductResponseDto } from "./dto/public-product-response.dto";
 
 @Injectable()
 export class ProductService {
@@ -191,5 +194,44 @@ export class ProductService {
 
     await product.save();
     return { success: true };
+  }
+
+  async findPublicProducts(): Promise<PublicProductResponseDto[]> {
+    const products = await this.productModel
+      .find({ status: "published" })
+      .populate("storeId", "name slug logoUrl")
+      .exec();
+
+    return products.map((product) => ({
+      _id: String(product._id),
+      name: product.name,
+      image: product.image,
+      price: product.price,
+      category: product.category,
+      type: product.type,
+      store: mapStoreToDto(product.storeId),
+      variants: product.variants?.map(mapVariantToDto) ?? [],
+    }));
+  }
+
+  async findOnePublished(id: string): Promise<PublicProductResponseDto> {
+    const product = await this.productModel
+      .findOne({
+        _id: id,
+        status: "published",
+      })
+      .exec();
+
+    if (!product) throw new NotFoundException("Product not found");
+
+    return {
+      _id: String(product._id),
+      name: product.name,
+      image: product.image,
+      price: product.price,
+      category: product.category,
+      type: product.type,
+      variants: product.variants?.map(mapVariantToDto) ?? [],
+    };
   }
 }

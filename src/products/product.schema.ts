@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
-import { Document, Types } from "mongoose";
+import mongoose, { Document, Types } from "mongoose";
 
 export type ProductDocument = Product & Document;
 export type ProductVariantDocument = ProductVariant & Document;
@@ -54,11 +54,17 @@ export class Product {
   @Prop()
   stock: number;
 
-  @Prop({ required: true })
+  @Prop({ type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true })
   storeId: Types.ObjectId; // หรือ Types.ObjectId
 
   @Prop({ type: [ProductVariantSchema], default: [] })
   variants?: ProductVariant[];
+
+  @Prop({
+    enum: ["draft", "pending", "published", "unpublished", "rejected"],
+    default: "draft",
+  })
+  status: string;
 }
 
 export const ProductSchema = SchemaFactory.createForClass(Product);

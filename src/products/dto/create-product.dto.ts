@@ -1,8 +1,24 @@
-import { IsString, IsOptional, IsNumber } from "class-validator";
+import {
+  IsString,
+  IsOptional,
+  IsNumber,
+  IsMongoId,
+  ValidateNested,
+} from "class-validator";
 import { Types } from "mongoose";
+import { IsEnum } from "class-validator";
+import { Type } from "class-transformer";
+
+export enum ProductStatus {
+  Draft = "draft",
+  Pending = "pending",
+  Published = "published",
+  Unpublished = "unpublished",
+  Rejected = "rejected",
+}
 
 export class CreateProductVariantDto {
-  @IsString()
+  @IsMongoId()
   _id?: Types.ObjectId;
 
   @IsString()
@@ -16,14 +32,18 @@ export class CreateProductVariantDto {
   image?: string;
 
   @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   price?: number;
 
   @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   stock?: number;
 
   @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => CreateProductVariantDto)
   variants?: CreateProductVariantDto[];
 }
 
@@ -46,16 +66,23 @@ export class CreateProductDto {
   image?: string;
 
   @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   price?: number;
 
   @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   stock?: number;
 
-  @IsString()
+  @IsMongoId()
   storeId: Types.ObjectId | string;
 
   @IsOptional()
-  variants?: CreateProductVariantDto[]; // ควร define type ให้ละเอียดขึ้น
+  @ValidateNested({ each: true })
+  @Type(() => CreateProductVariantDto)
+  variants?: CreateProductVariantDto[];
+
+  @IsEnum(ProductStatus)
+  status: ProductStatus;
 }
