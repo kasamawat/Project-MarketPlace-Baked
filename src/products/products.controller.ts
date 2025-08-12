@@ -11,10 +11,7 @@ import {
 } from "@nestjs/common";
 
 import { CreateProductDto } from "./dto/create-product.dto";
-import {
-  UpdateProductDto,
-  UpdateProductVariantDto,
-} from "./dto/update-product.dto";
+import { UpdateProductDto } from "./dto/update-product.dto";
 import { ProductService } from "./products.service";
 import { AuthGuard } from "@nestjs/passport";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
@@ -64,24 +61,24 @@ export class ProductController {
     return this.productService.removeProduct(productId, user);
   }
 
-  @Put(":productId/variant")
-  @UseGuards(AuthGuard("jwt"))
-  async updateVariant(
-    @Param("productId") productId: string,
-    @Body("variant") variantDto: UpdateProductVariantDto,
-    @CurrentUser() user: JwtPayload,
-  ) {
-    // ส่งไป service
-    return this.productService.updateVariant(productId, variantDto, user);
-  }
+  // @Put(":productId/variant")
+  // @UseGuards(AuthGuard("jwt"))
+  // async updateVariant(
+  //   @Param("productId") productId: string,
+  //   @Body("variant") variantDto: UpdateProductVariantDto,
+  //   @CurrentUser() user: JwtPayload,
+  // ) {
+  //   // ส่งไป service
+  //   return this.productService.updateVariant(productId, variantDto, user);
+  // }
 
-  @Delete(":productId/variant/:variantId")
-  @UseGuards(AuthGuard("jwt"))
-  async removeVariant(
-    @Param("productId") productId: string,
-    @Param("variantId") variantId: string,
-    @CurrentUser() user: JwtPayload,
-  ) {
-    return this.productService.removeVariant(productId, variantId, user);
-  }
+  // @Delete(":productId/variant/:variantId")
+  // @UseGuards(AuthGuard("jwt"))
+  // async removeVariant(
+  //   @Param("productId") productId: string,
+  //   @Param("variantId") variantId: string,
+  //   @CurrentUser() user: JwtPayload,
+  // ) {
+  //   return this.productService.removeVariant(productId, variantId, user);
+  // }
 }

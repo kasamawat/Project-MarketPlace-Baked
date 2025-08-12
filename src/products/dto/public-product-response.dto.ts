@@ -1,14 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
-export class PublicProductStoreDto {
-  @ApiProperty()
-  _id: string;
-  @ApiProperty()
-  name: string;
-  @ApiProperty()
-  slug: string;
-  @ApiProperty({ required: false })
-  logoUrl?: string;
-}
+import { PublicStoreResponseDto } from "src/store/dto/public-store-response.dto";
 
 export class PublicProductVariantDto {
   @ApiProperty()
@@ -33,6 +24,8 @@ export class PublicProductResponseDto {
   @ApiProperty()
   name: string;
   @ApiProperty()
+  description: string;
+  @ApiProperty()
   image: string;
   @ApiProperty()
   price: number;
@@ -40,8 +33,8 @@ export class PublicProductResponseDto {
   category: string;
   @ApiProperty()
   type: string;
-  @ApiProperty({ type: () => PublicProductStoreDto, required: false })
-  store?: PublicProductStoreDto;
+  @ApiProperty({ type: () => PublicStoreResponseDto, required: false })
+  store?: PublicStoreResponseDto;
   @ApiProperty({ type: () => [PublicProductVariantDto], required: false })
   variants?: PublicProductVariantDto[];
 }

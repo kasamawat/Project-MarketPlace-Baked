@@ -8,7 +8,7 @@ import { Response } from "express";
 
 @Controller("store")
 export class StoreController {
-  constructor(private readonly storeService: StoreService) { }
+  constructor(private readonly storeService: StoreService) {}
 
   @Post("register")
   @UseGuards(AuthGuard("jwt"))

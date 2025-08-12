@@ -5,21 +5,21 @@ import {
 } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model, Types } from "mongoose";
-import { Product, ProductDocument } from "./product.schema";
 import { CreateProductDto } from "./dto/create-product.dto";
-import {
-  UpdateProductDto,
-  UpdateProductVariantDto,
-} from "./dto/update-product.dto";
+import { UpdateProductDto } from "./dto/update-product.dto";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
 import {
   assignIdsToVariants,
   mapStoreToDto,
   mapVariantToDto,
-  removeVariantInTree,
-  updateVariantInTree,
 } from "src/lib/functionTools";
 import { PublicProductResponseDto } from "./dto/public-product-response.dto";
+import {
+  indexOldTreeByPath,
+  normalizeIncomingTree,
+  reuseIdsByContentPath,
+} from "src/lib/functionUpdateProduct";
+import { Product, ProductDocument } from "./schemas/product.schema";
 
 @Injectable()
 export class ProductService {
@@ -77,34 +77,66 @@ export class ProductService {
 
   async updateProduct(
     productId: string,
-    dto: UpdateProductDto,
+    productDto: UpdateProductDto,
     payload: JwtPayload,
   ) {
-    // ตรวจสอบสิทธิ์
+    // --- ตรวจสิทธิ์ ---
     const productBefore = await this.productModel.findById(productId);
     if (!productBefore) throw new NotFoundException("Product not found");
     if (productBefore.storeId.toString() !== payload.storeId) {
       throw new ForbiddenException("You cannot edit this product");
     }
 
-    // --- แปลง storeId เป็น ObjectId ถ้ามี ---
-    if (dto.storeId && typeof dto.storeId === "string") {
-      // เผื่อกรณี update เปลี่ยนร้าน (ถ้าไม่อนุญาตเปลี่ยนร้าน ตัดบรรทัดนี้ออก)
-      dto.storeId = new Types.ObjectId(dto.storeId);
+    // --- แปลง storeId เป็น ObjectId ถ้าส่งมา ---
+    if (productDto.storeId && typeof productDto.storeId === "string") {
+      productDto.storeId = new Types.ObjectId(productDto.storeId);
     }
 
-    let unsetObj: Record<string, string> = {};
+    // เตรียม $set / $unset
+    const updateDoc: UpdateProductDto = { ...productDto };
+    const unsetObj: Record<string, string> = {};
 
-    if (dto.variants && dto.variants.length > 0) {
-      assignIdsToVariants(dto.variants); // แปลง _id ของ variants ทุกระดับ
-      unsetObj = { image: "", price: "", stock: "" };
+    // จัดการ variants เฉพาะกรณีที่ฟิลด์นี้ "ถูกส่งมา"
+    if ("variants" in productDto) {
+      if (Array.isArray(productDto.variants)) {
+        if (productDto.variants.length > 0) {
+          // 1) ทำความสะอาด input
+          const incoming = normalizeIncomingTree(productDto.variants);
+
+          // 2) ทำดัชนีจากต้นไม้เดิม
+          const oldIndex = indexOldTreeByPath(
+            (productBefore as UpdateProductDto).variants,
+          );
+
+          // 3) ใส่ _id เดิมคืนตาม path (name+value)
+          const merged = reuseIdsByContentPath(incoming, oldIndex);
+
+          // 4) full replace: set variants = merged (สิ่งที่ไม่ถูกส่งมาจะถูกลบทิ้ง)
+          updateDoc.variants = merged;
+
+          // เมื่อมี variants → product-level price/stock ไม่ใช้แล้ว
+          unsetObj.price = "";
+          unsetObj.stock = "";
+        } else {
+          // ส่ง [] มา → ต้องการลบ variants ออก
+          unsetObj.variants = "";
+        }
+      } else {
+        // ส่งค่าที่ไม่ใช่ array มา (เช่น null) → ถือว่าไม่แตะ หรือจะตีความเป็นลบก็ได้
+        // ที่นี่เลือก "ไม่แตะ" เพื่อความปลอดภัย
+        delete updateDoc.variants;
+      }
     } else {
-      unsetObj = { variants: "" };
+      // ไม่ได้ส่งฟิลด์ variants มา → อย่าแตะ variants เดิม
+      delete updateDoc.variants;
     }
 
     const product = await this.productModel.findByIdAndUpdate(
       productId,
-      { $set: dto, $unset: unsetObj },
+      {
+        $set: updateDoc,
+        ...(Object.keys(unsetObj).length ? { $unset: unsetObj } : {}),
+      },
       { new: true },
     );
     if (!product) throw new NotFoundException("Product not found");
@@ -125,76 +157,76 @@ export class ProductService {
     return this.productModel.findByIdAndDelete(productId).exec();
   }
 
-  async updateVariant(
-    productId: string,
-    variantDto: UpdateProductVariantDto,
-    payload: JwtPayload,
-  ) {
-    // Find product from productId and Check permission
-    const product = await this.productModel.findById(productId);
-    if (!product) throw new NotFoundException("Product not found");
-    if (product.storeId.toString() !== payload.storeId) {
-      throw new ForbiddenException("You cannot edit this product");
-    }
+  // async updateVariant(
+  //   productId: string,
+  //   variantDto: UpdateProductVariantDto,
+  //   payload: JwtPayload,
+  // ) {
+  //   // Find product from productId and Check permission
+  //   const product = await this.productModel.findById(productId);
+  //   if (!product) throw new NotFoundException("Product not found");
+  //   if (product.storeId.toString() !== payload.storeId) {
+  //     throw new ForbiddenException("You cannot edit this product");
+  //   }
 
-    // ให้แน่ใจว่า variant ที่จะอัพเดท มี _id ถ้าไม่มีให้สร้างใหม่
-    if (!variantDto._id) {
-      variantDto._id = new Types.ObjectId();
-    } else {
-      variantDto._id = new Types.ObjectId(variantDto._id);
-    }
+  //   // ให้แน่ใจว่า variant ที่จะอัพเดท มี _id ถ้าไม่มีให้สร้างใหม่
+  //   if (!variantDto._id) {
+  //     variantDto._id = new Types.ObjectId();
+  //   } else {
+  //     variantDto._id = new Types.ObjectId(variantDto._id);
+  //   }
 
-    // สร้าง _id ให้กับ sub-variants ทุกระดับ
-    if (Array.isArray(variantDto.variants)) {
-      assignIdsToVariants(variantDto.variants);
-    }
+  //   // สร้าง _id ให้กับ sub-variants ทุกระดับ
+  //   if (Array.isArray(variantDto.variants)) {
+  //     assignIdsToVariants(variantDto.variants);
+  //   }
 
-    // ===== update (recursive) =====
-    if (Array.isArray(product.variants)) {
-      const found = updateVariantInTree(product.variants, variantDto);
+  //   // ===== update (recursive) =====
+  //   if (Array.isArray(product.variants)) {
+  //     const found = updateVariantInTree(product.variants, variantDto);
 
-      if (!found) {
-        // ถ้าไม่เจอใน tree เดิม ให้ push เป็น top-level variant
-        product.variants.push(variantDto);
-      }
-    } else {
-      product.variants = [variantDto];
-    }
+  //     if (!found) {
+  //       // ถ้าไม่เจอใน tree เดิม ให้ push เป็น top-level variant
+  //       product.variants.push(variantDto);
+  //     }
+  //   } else {
+  //     product.variants = [variantDto];
+  //   }
 
-    // tell mongo this field have update
-    product.markModified("variants");
-    await product.save();
+  //   // tell mongo this field have update
+  //   product.markModified("variants");
+  //   await product.save();
 
-    return variantDto;
-  }
+  //   return variantDto;
+  // }
 
-  async removeVariant(
-    productId: string,
-    variantId: string,
-    payload: JwtPayload,
-  ) {
-    // Find product and Check permission
-    const product = await this.productModel.findById(productId);
-    if (!product) throw new NotFoundException("Product not found");
-    if (product.storeId.toString() !== payload.storeId?.toString()) {
-      throw new ForbiddenException("You cannot edit this product");
-    }
+  // async removeVariant(
+  //   productId: string,
+  //   variantId: string,
+  //   payload: JwtPayload,
+  // ) {
+  //   // Find product and Check permission
+  //   const product = await this.productModel.findById(productId);
+  //   if (!product) throw new NotFoundException("Product not found");
+  //   if (product.storeId.toString() !== payload.storeId?.toString()) {
+  //     throw new ForbiddenException("You cannot edit this product");
+  //   }
 
-    // Delete variant recursive
-    product.variants = removeVariantInTree(product.variants ?? [], variantId);
+  //   // Delete variant recursive
+  //   product.variants = removeVariantInTree(product.variants ?? [], variantId);
 
-    // *** Check if all variants are removed ***
-    if (!product.variants || product.variants.length === 0) {
-      product.price = 0;
-      product.stock = 0;
-      product.image = "";
-    }
-    // Tell Mongoose this field changed!
-    product.markModified("variants");
+  //   // *** Check if all variants are removed ***
+  //   if (!product.variants || product.variants.length === 0) {
+  //     product.price = 0;
+  //     product.stock = 0;
+  //     product.image = "";
+  //   }
+  //   // Tell Mongoose this field changed!
+  //   product.markModified("variants");
 
-    await product.save();
-    return { success: true };
-  }
+  //   await product.save();
+  //   return { success: true };
+  // }
 
   async findPublicProducts(): Promise<PublicProductResponseDto[]> {
     const products = await this.productModel
@@ -205,6 +237,7 @@ export class ProductService {
     return products.map((product) => ({
       _id: String(product._id),
       name: product.name,
+      description: product.description,
       image: product.image,
       price: product.price,
       category: product.category,
@@ -220,6 +253,7 @@ export class ProductService {
         _id: id,
         status: "published",
       })
+      .populate("storeId", "name slug logoUrl")
       .exec();
 
     if (!product) throw new NotFoundException("Product not found");
@@ -228,9 +262,11 @@ export class ProductService {
       _id: String(product._id),
       name: product.name,
       image: product.image,
+      description: product.description,
       price: product.price,
       category: product.category,
       type: product.type,
+      store: mapStoreToDto(product.storeId),
       variants: product.variants?.map(mapVariantToDto) ?? [],
     };
   }

@@ -12,7 +12,7 @@ import { Model } from "mongoose";
 import { User, UserDocument } from "src/user/user.schema";
 import { Request } from "express";
 import { JwtPayload } from "./types/jwt-payload.interface";
-import { Store } from "src/store/store.schema";
+import { Store } from "src/store/schemas/store.schema";
 
 @Injectable()
 export class AuthService {

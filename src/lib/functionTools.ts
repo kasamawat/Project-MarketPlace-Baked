@@ -1,10 +1,8 @@
 // src/lib/assignIdsToVariants.ts
 import { Types } from "mongoose";
-import {
-  PublicProductStoreDto,
-  PublicProductVariantDto,
-} from "src/products/dto/public-product-response.dto";
-import { ProductVariant } from "src/products/product.schema";
+import { PublicProductVariantDto } from "src/products/dto/public-product-response.dto";
+import { ProductVariant } from "src/products/schemas/product.schema";
+import { PublicStoreResponseDto } from "src/store/dto/public-store-response.dto";
 
 /**
  * ใส่ _id ให้กับ variants/sub-variants ทุกระดับ (recursive)
@@ -103,7 +101,7 @@ export function removeVariantInTree(
 // 1. Type guard สำหรับ store
 export function isPopulatedStore(
   store: unknown,
-): store is PublicProductStoreDto {
+): store is PublicStoreResponseDto {
   return (
     !!store &&
     typeof store === "object" &&
@@ -114,7 +112,7 @@ export function isPopulatedStore(
 }
 
 // 2. Mapper ช่วยแปลง store เป็น DTO
-export function mapStoreToDto(store: any): PublicProductStoreDto | undefined {
+export function mapStoreToDto(store: any): PublicStoreResponseDto | undefined {
   if (!isPopulatedStore(store)) return undefined;
   return {
     _id: String(store._id),
