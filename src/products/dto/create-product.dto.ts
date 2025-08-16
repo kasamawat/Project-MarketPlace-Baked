@@ -2,11 +2,13 @@ import {
   IsString,
   IsOptional,
   IsNumber,
-  IsMongoId,
+  IsEnum,
+  IsArray,
   ValidateNested,
+  MaxLength,
+  IsObject,
+  IsBoolean,
 } from "class-validator";
-import { Types } from "mongoose";
-import { IsEnum } from "class-validator";
 import { Type } from "class-transformer";
 
 export enum ProductStatus {
@@ -17,19 +19,14 @@ export enum ProductStatus {
   Rejected = "rejected",
 }
 
-export class CreateProductVariantDto {
-  @IsMongoId()
-  _id?: Types.ObjectId;
-
-  @IsString()
-  name: string;
-
-  @IsString()
-  value: string;
-
+export class CreateSkuDto {
   @IsOptional()
   @IsString()
-  image?: string;
+  @MaxLength(80)
+  skuCode?: string;
+
+  @IsObject()
+  attributes!: Record<string, string>;
 
   @IsOptional()
   @Type(() => Number)
@@ -37,52 +34,30 @@ export class CreateProductVariantDto {
   price?: number;
 
   @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  stock?: number;
+  @IsString()
+  image?: string;
 
   @IsOptional()
-  @ValidateNested({ each: true })
-  @Type(() => CreateProductVariantDto)
-  variants?: CreateProductVariantDto[];
+  @IsBoolean()
+  purchasable?: boolean;
 }
 
 export class CreateProductDto {
-  @IsString()
-  name: string;
+  @IsString() @MaxLength(150) name!: string;
+  @IsOptional() @IsString() @MaxLength(2000) description?: string;
 
-  @IsOptional()
-  @IsString()
-  description?: string;
+  @IsString() @MaxLength(100) category!: string;
+  @IsString() @MaxLength(50) type!: string;
 
-  @IsString()
-  category: string;
+  @IsOptional() @IsString() image?: string;
+  @IsOptional() @Type(() => Number) @IsNumber() defaultPrice?: number;
 
-  @IsString()
-  type: string;
+  // @IsMongoId() storeId!: string;
+  @IsOptional() @IsEnum(ProductStatus) status?: ProductStatus;
 
-  @IsOptional()
-  @IsString()
-  image?: string;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  price?: number;
-
-  @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  stock?: number;
-
-  @IsMongoId()
-  storeId: Types.ObjectId | string;
-
-  @IsOptional()
+  // โหมด B: ส่ง SKUs ตรง ๆ
+  @IsArray()
   @ValidateNested({ each: true })
-  @Type(() => CreateProductVariantDto)
-  variants?: CreateProductVariantDto[];
-
-  @IsEnum(ProductStatus)
-  status: ProductStatus;
+  @Type(() => CreateSkuDto)
+  skus!: CreateSkuDto[];
 }

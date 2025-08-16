@@ -1,10 +1,7 @@
 import { PartialType } from "@nestjs/mapped-types";
-import {
-  CreateProductDto,
-  CreateProductVariantDto,
-} from "./create-product.dto";
+import { CreateProductDto } from "./create-product.dto";
 
-export class UpdateProductDto extends PartialType(CreateProductDto) {}
-export class UpdateProductVariantDto extends PartialType(
-  CreateProductVariantDto,
-) {}
+// ไม่ให้แก้ skus ผ่าน DTO นี้
+export class UpdateProductDto extends PartialType(CreateProductDto) {
+  skus?: never;
+}

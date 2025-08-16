@@ -2,69 +2,33 @@ import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
 import mongoose, { Document, Types } from "mongoose";
 
 export type ProductDocument = Product & Document;
-export type ProductVariantDocument = ProductVariant & Document;
-
-@Schema({ timestamps: true, _id: true })
-export class ProductVariant {
-  @Prop()
-  _id?: Types.ObjectId;
-
-  @Prop({ required: true })
-  name?: string;
-
-  @Prop()
-  value?: string;
-
-  @Prop()
-  image?: string;
-
-  @Prop()
-  price?: number;
-
-  @Prop()
-  stock?: number;
-
-  @Prop({ type: [Object], default: [] }) // หรือ type: [ProductVariantSchema]
-  variants?: ProductVariant[];
-}
-
-export const ProductVariantSchema =
-  SchemaFactory.createForClass(ProductVariant);
 
 @Schema({ timestamps: true })
 export class Product {
-  @Prop({ required: true })
-  name: string;
+  @Prop({ required: true }) name!: string;
+  @Prop() description?: string;
 
-  @Prop()
-  description: string;
+  @Prop({ required: true }) category!: string;
+  @Prop({ required: true }) type!: string;
 
-  @Prop({ required: true })
-  category: string;
+  @Prop() image?: string;
 
-  @Prop({ required: true })
-  type: string;
+  // ราคาเริ่มต้น (ใช้ fallback ให้ SKU ถ้า SKU ไม่กำหนด)
+  @Prop() defaultPrice?: number;
 
-  @Prop()
-  image: string;
-
-  @Prop()
-  price: number;
-
-  @Prop()
-  stock: number;
-
-  @Prop({ type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true })
-  storeId: Types.ObjectId; // หรือ Types.ObjectId
-
-  @Prop({ type: [ProductVariantSchema], default: [] })
-  variants?: ProductVariant[];
+  @Prop({
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Store",
+    required: true,
+    index: true,
+  })
+  storeId!: Types.ObjectId;
 
   @Prop({
     enum: ["draft", "pending", "published", "unpublished", "rejected"],
     default: "draft",
   })
-  status: string;
+  status!: string;
 }
 
 export const ProductSchema = SchemaFactory.createForClass(Product);

@@ -9,7 +9,7 @@ import * as bcrypt from "bcryptjs";
 import * as jwt from "jsonwebtoken";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model } from "mongoose";
-import { User, UserDocument } from "src/user/user.schema";
+import { User, UserDocument } from "src/user/schemas/user.schema";
 import { Request } from "express";
 import { JwtPayload } from "./types/jwt-payload.interface";
 import { Store } from "src/store/schemas/store.schema";

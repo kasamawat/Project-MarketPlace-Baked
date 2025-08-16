@@ -1,273 +1,404 @@
+// products.service.ts
 import {
-  ForbiddenException,
   Injectable,
+  ForbiddenException,
   NotFoundException,
+  ConflictException,
 } from "@nestjs/common";
-import { InjectModel } from "@nestjs/mongoose";
-import { Model, Types } from "mongoose";
+import { InjectModel, InjectConnection } from "@nestjs/mongoose";
+import {
+  Model,
+  Types,
+  Connection,
+  UpdateQuery,
+  FilterQuery,
+  SortOrder,
+} from "mongoose";
+import { Product, ProductDocument } from "./schemas/product.schema";
 import { CreateProductDto } from "./dto/create-product.dto";
 import { UpdateProductDto } from "./dto/update-product.dto";
+import { SkusService } from "../skus/skus.service";
+import { Sku, SkuDocument } from "src/skus/schemas/sku-schema";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
+import { ListProductsQueryDto } from "./dto/list-products.query";
+import { escapeRegExp } from "lodash";
+import { ProductListItem } from "./dto/product-list-item";
 import {
-  assignIdsToVariants,
-  mapStoreToDto,
-  mapVariantToDto,
-} from "src/lib/functionTools";
-import { PublicProductResponseDto } from "./dto/public-product-response.dto";
-import {
-  indexOldTreeByPath,
-  normalizeIncomingTree,
-  reuseIdsByContentPath,
-} from "src/lib/functionUpdateProduct";
-import { Product, ProductDocument } from "./schemas/product.schema";
+  ProductDetailResponseDto,
+  ProductLeanRaw,
+} from "./dto/response-product.dto";
+import { SkuLeanRaw, SkuResponseDto } from "./dto/response-skus.dto";
+import { SkuBatchSyncDto } from "./dto/sku-batch.dto";
+import { normalizeAttributes } from "src/shared/utils/sku.util";
+import { plainToInstance } from "class-transformer";
 
 @Injectable()
-export class ProductService {
+export class ProductsService {
   constructor(
     @InjectModel(Product.name) private productModel: Model<ProductDocument>,
+    private readonly skus: SkusService,
+    @InjectModel(Sku.name) private readonly skuModel: Model<SkuDocument>, // ✅ type-safe
+    @InjectConnection() private readonly connection: Connection,
   ) {}
 
-  async createProduct(dto: CreateProductDto, payload: JwtPayload) {
-    const storeId = new Types.ObjectId(payload.storeId);
+  async createWithSkus(dto: CreateProductDto, payload: JwtPayload) {
+    const storeId = payload.storeId;
     if (!storeId) {
-      throw new Error("Store ID not found in token");
+      throw new ForbiddenException("Missing store in token");
     }
 
-    // ถ้ามี _id ที่ไม่สมควร ให้ remove ทิ้ง
-    if ("_id" in dto && (!dto._id || dto._id === "")) {
-      delete dto._id;
-    }
+    const session = await this.connection.startSession();
+    let product!: ProductDocument;
 
-    // เคลียร์ field ถ้าเป็นสินค้าที่มี variant
-    if (Array.isArray(dto.variants) && dto.variants.length > 0) {
-      delete dto.image;
-      delete dto.price;
-      delete dto.stock;
+    await session.withTransaction(async () => {
+      product = await this.productModel
+        .create(
+          [
+            {
+              name: dto.name,
+              description: dto.description,
+              category: dto.category,
+              type: dto.type,
+              image: dto.image,
+              defaultPrice: dto.defaultPrice,
+              storeId: new Types.ObjectId(storeId),
+              status: dto.status ?? "draft",
+            },
+          ],
+          { session },
+        )
+        .then((r) => r[0]);
 
-      assignIdsToVariants(dto.variants);
-    }
-
-    const created = new this.productModel({
-      ...dto,
-      storeId,
+      const rows = await this.skus.prepareForInsert(
+        product._id as Types.ObjectId,
+        product.name,
+        product.defaultPrice,
+        dto.skus,
+      );
+      // ใช้ model โดยตรงผ่าน module export
+      await this.skuModel.insertMany(rows, { session });
     });
 
-    return created.save();
+    await session.endSession();
+    return { productId: product._id };
   }
 
-  async findAllProduct(query: Record<string, any>, payload: JwtPayload) {
-    const storeId = new Types.ObjectId(payload.storeId);
-    // ป้องกัน user แอบค้นร้านอื่น หรือ query storeId ของคนอื่น
-    // ลบ storeId ออกจาก query (ถ้ามีจาก frontend)
-    if (query.storeId) {
-      delete query.storeId;
+  async update(productId: string, dto: UpdateProductDto, payload: JwtPayload) {
+    const prod = await this.productModel.findById(productId);
+    if (!prod) throw new NotFoundException("Product not found");
+    if (String(prod.storeId) !== String(payload.storeId)) {
+      throw new ForbiddenException("You cannot edit this product");
     }
+    const $set: UpdateQuery<Product>["$set"] = {}; // ✅ typed by Mongoose
+    if (dto.name !== undefined) $set.name = dto.name;
+    if (dto.description !== undefined) $set.description = dto.description;
+    if (dto.category !== undefined) $set.category = dto.category;
+    if (dto.type !== undefined) $set.type = dto.type;
+    if (dto.image !== undefined) $set.image = dto.image;
+    if (dto.defaultPrice !== undefined) $set.defaultPrice = dto.defaultPrice;
+    if (dto.status !== undefined) $set.status = dto.status;
 
-    // ใส่ storeId จาก token (เสมอ)
-    const filter = { ...query, storeId };
+    await this.productModel
+      .updateOne({ _id: productId }, { $set }, { runValidators: true })
+      .exec(); // ใส่ { runValidators: true } ใน updateOne/findOneAndUpdate เสมอ เพื่อให้ schema validator ทำงานตอนอัปเดต
 
-    return this.productModel.find(filter).exec();
+    return this.productModel.findById(productId).lean();
   }
 
-  async findOneProduct(productId: string) {
-    const product = await this.productModel.findById(productId).exec();
-    if (!product) throw new NotFoundException("Product not found");
-    return product;
-  }
-
-  async updateProduct(
-    productId: string,
-    productDto: UpdateProductDto,
-    payload: JwtPayload,
-  ) {
-    // --- ตรวจสิทธิ์ ---
-    const productBefore = await this.productModel.findById(productId);
-    if (!productBefore) throw new NotFoundException("Product not found");
-    if (productBefore.storeId.toString() !== payload.storeId) {
+  /** Sync SKUs (create/update/delete) */
+  async syncSkus(productId: string, dto: SkuBatchSyncDto, payload: JwtPayload) {
+    const prod = await this.productModel.findById(productId).lean();
+    if (!prod) throw new NotFoundException("Product not found");
+    if (String(prod.storeId) !== String(payload.storeId)) {
       throw new ForbiddenException("You cannot edit this product");
     }
 
-    // --- แปลง storeId เป็น ObjectId ถ้าส่งมา ---
-    if (productDto.storeId && typeof productDto.storeId === "string") {
-      productDto.storeId = new Types.ObjectId(productDto.storeId);
-    }
+    const create = dto.create ?? [];
+    const update = dto.update ?? [];
+    const delIds = (dto.delete ?? []).map((id) => new Types.ObjectId(id));
 
-    // เตรียม $set / $unset
-    const updateDoc: UpdateProductDto = { ...productDto };
-    const unsetObj: Record<string, string> = {};
+    // ตรวจ attributes ต้องไม่ว่างสำหรับทุกตัว (ตามกติกาของคุณ)
+    // for (const c of create) {
+    //   if (!c.attributes || Object.keys(c.attributes).length === 0) {
+    //     throw new BadRequestException("Each SKU must provide attributes.");
+    //   }
+    // }
+    // for (const u of update) {
+    //   if (!u.attributes || Object.keys(u.attributes).length === 0) {
+    //     throw new BadRequestException("Each SKU must provide attributes.");
+    //   }
+    // }
 
-    // จัดการ variants เฉพาะกรณีที่ฟิลด์นี้ "ถูกส่งมา"
-    if ("variants" in productDto) {
-      if (Array.isArray(productDto.variants)) {
-        if (productDto.variants.length > 0) {
-          // 1) ทำความสะอาด input
-          const incoming = normalizeIncomingTree(productDto.variants);
-
-          // 2) ทำดัชนีจากต้นไม้เดิม
-          const oldIndex = indexOldTreeByPath(
-            (productBefore as UpdateProductDto).variants,
-          );
-
-          // 3) ใส่ _id เดิมคืนตาม path (name+value)
-          const merged = reuseIdsByContentPath(incoming, oldIndex);
-
-          // 4) full replace: set variants = merged (สิ่งที่ไม่ถูกส่งมาจะถูกลบทิ้ง)
-          updateDoc.variants = merged;
-
-          // เมื่อมี variants → product-level price/stock ไม่ใช้แล้ว
-          unsetObj.price = "";
-          unsetObj.stock = "";
-        } else {
-          // ส่ง [] มา → ต้องการลบ variants ออก
-          unsetObj.variants = "";
-        }
-      } else {
-        // ส่งค่าที่ไม่ใช่ array มา (เช่น null) → ถือว่าไม่แตะ หรือจะตีความเป็นลบก็ได้
-        // ที่นี่เลือก "ไม่แตะ" เพื่อความปลอดภัย
-        delete updateDoc.variants;
-      }
-    } else {
-      // ไม่ได้ส่งฟิลด์ variants มา → อย่าแตะ variants เดิม
-      delete updateDoc.variants;
-    }
-
-    const product = await this.productModel.findByIdAndUpdate(
-      productId,
-      {
-        $set: updateDoc,
-        ...(Object.keys(unsetObj).length ? { $unset: unsetObj } : {}),
-      },
-      { new: true },
-    );
-    if (!product) throw new NotFoundException("Product not found");
-    return product;
-  }
-
-  async removeProduct(productId: string, payload: JwtPayload) {
-    // 1. Find product
-    const product = await this.productModel.findById(productId);
-    if (!product) throw new NotFoundException("Product not found");
-
-    // 2. Check storeId match payload.storeId yes? or no?
-    if (product.storeId.toString() !== payload.storeId) {
-      throw new ForbiddenException("You cannot delete this product");
-    }
-
-    // 3. Delete product
-    return this.productModel.findByIdAndDelete(productId).exec();
-  }
-
-  // async updateVariant(
-  //   productId: string,
-  //   variantDto: UpdateProductVariantDto,
-  //   payload: JwtPayload,
-  // ) {
-  //   // Find product from productId and Check permission
-  //   const product = await this.productModel.findById(productId);
-  //   if (!product) throw new NotFoundException("Product not found");
-  //   if (product.storeId.toString() !== payload.storeId) {
-  //     throw new ForbiddenException("You cannot edit this product");
-  //   }
-
-  //   // ให้แน่ใจว่า variant ที่จะอัพเดท มี _id ถ้าไม่มีให้สร้างใหม่
-  //   if (!variantDto._id) {
-  //     variantDto._id = new Types.ObjectId();
-  //   } else {
-  //     variantDto._id = new Types.ObjectId(variantDto._id);
-  //   }
-
-  //   // สร้าง _id ให้กับ sub-variants ทุกระดับ
-  //   if (Array.isArray(variantDto.variants)) {
-  //     assignIdsToVariants(variantDto.variants);
-  //   }
-
-  //   // ===== update (recursive) =====
-  //   if (Array.isArray(product.variants)) {
-  //     const found = updateVariantInTree(product.variants, variantDto);
-
-  //     if (!found) {
-  //       // ถ้าไม่เจอใน tree เดิม ให้ push เป็น top-level variant
-  //       product.variants.push(variantDto);
-  //     }
-  //   } else {
-  //     product.variants = [variantDto];
-  //   }
-
-  //   // tell mongo this field have update
-  //   product.markModified("variants");
-  //   await product.save();
-
-  //   return variantDto;
-  // }
-
-  // async removeVariant(
-  //   productId: string,
-  //   variantId: string,
-  //   payload: JwtPayload,
-  // ) {
-  //   // Find product and Check permission
-  //   const product = await this.productModel.findById(productId);
-  //   if (!product) throw new NotFoundException("Product not found");
-  //   if (product.storeId.toString() !== payload.storeId?.toString()) {
-  //     throw new ForbiddenException("You cannot edit this product");
-  //   }
-
-  //   // Delete variant recursive
-  //   product.variants = removeVariantInTree(product.variants ?? [], variantId);
-
-  //   // *** Check if all variants are removed ***
-  //   if (!product.variants || product.variants.length === 0) {
-  //     product.price = 0;
-  //     product.stock = 0;
-  //     product.image = "";
-  //   }
-  //   // Tell Mongoose this field changed!
-  //   product.markModified("variants");
-
-  //   await product.save();
-  //   return { success: true };
-  // }
-
-  async findPublicProducts(): Promise<PublicProductResponseDto[]> {
-    const products = await this.productModel
-      .find({ status: "published" })
-      .populate("storeId", "name slug logoUrl")
-      .exec();
-
-    return products.map((product) => ({
-      _id: String(product._id),
-      name: product.name,
-      description: product.description,
-      image: product.image,
-      price: product.price,
-      category: product.category,
-      type: product.type,
-      store: mapStoreToDto(product.storeId),
-      variants: product.variants?.map(mapVariantToDto) ?? [],
+    // เตรียม normalizedAttributes + skuCode
+    const createRows = create.map((d) => ({
+      productId: new Types.ObjectId(productId),
+      attributes: d.attributes,
+      normalizedAttributes: normalizeAttributes(d.attributes),
+      skuCode: d.skuCode?.trim(),
+      price: typeof d.price === "number" ? d.price : undefined,
+      image: d.image,
+      purchasable: d.purchasable ?? true,
     }));
+
+    const updateRows = update.map((d) => ({
+      _id: new Types.ObjectId(d._id),
+      attributes: d.attributes,
+      normalizedAttributes: normalizeAttributes(d.attributes),
+      skuCode: d.skuCode?.trim(),
+      price: typeof d.price === "number" ? d.price : undefined,
+      image: d.image,
+      purchasable: d.purchasable ?? true,
+    }));
+
+    // ตรวจซ้ำใน payload (normalizedAttributes/skuCode) ระหว่าง create/update เอง
+    const seenNorm = new Set<string>();
+    const seenCode = new Set<string>();
+    for (const row of [...createRows, ...updateRows]) {
+      if (seenNorm.has(row.normalizedAttributes)) {
+        throw new ConflictException(
+          `Duplicate attributes in payload: ${row.normalizedAttributes}`,
+        );
+      }
+      seenNorm.add(row.normalizedAttributes);
+
+      if (row.skuCode) {
+        const code = row.skuCode.toUpperCase();
+        if (seenCode.has(code))
+          throw new ConflictException(`Duplicate skuCode in payload: ${code}`);
+        seenCode.add(code);
+      }
+    }
+
+    // ตรวจซ้ำกับ DB (ชนกับ SKUs อื่น ๆ ใน product เดียวกัน)
+    const excludeIds = updateRows.map((u) => u._id);
+
+    const exists = await this.skuModel
+      .find({
+        productId: new Types.ObjectId(productId),
+        $or: [
+          { normalizedAttributes: { $in: [...seenNorm] } },
+          ...(seenCode.size ? [{ skuCode: { $in: [...seenCode] } }] : []),
+        ],
+        ...(excludeIds.length ? { _id: { $nin: excludeIds } } : {}),
+      })
+      .select("_id normalizedAttributes skuCode")
+      .lean();
+
+    if (exists.length) {
+      throw new ConflictException(
+        "Some SKUs already exist or conflict with current payload.",
+      );
+    }
+
+    // ดำเนินการ: ไม่มี replica set? ใช้ bulkWrite / insertMany แบบไม่มี session
+    const writes: any[] = [];
+
+    // create
+    if (createRows.length) {
+      // ใช้ insertMany แยก เพื่อให้ unique index โยน error ได้ชัดเจน
+      await this.skuModel.insertMany(createRows, { ordered: true });
+    }
+
+    // update
+    for (const u of updateRows) {
+      writes.push({
+        updateOne: {
+          filter: { _id: u._id, productId: new Types.ObjectId(productId) },
+          update: {
+            $set: {
+              attributes: u.attributes,
+              normalizedAttributes: u.normalizedAttributes,
+              skuCode: u.skuCode,
+              price: u.price,
+              image: u.image,
+              purchasable: u.purchasable,
+            },
+          },
+          upsert: false,
+        },
+      });
+    }
+
+    // delete
+    if (delIds.length) {
+      writes.push({
+        deleteMany: {
+          filter: {
+            _id: { $in: delIds },
+            productId: new Types.ObjectId(productId),
+          },
+        },
+      });
+    }
+
+    if (writes.length) {
+      await this.skuModel.bulkWrite(writes, { ordered: true });
+    }
+
+    // ตอบกลับเป็น SKU ปัจจุบันทั้งหมด
+    const after = await this.skuModel
+      .find({ productId: new Types.ObjectId(productId) })
+      .select("_id skuCode attributes price image purchasable")
+      .lean()
+      .exec();
+
+    return plainToInstance(SkuResponseDto, after, {
+      excludeExtraneousValues: true,
+    });
   }
 
-  async findOnePublished(id: string): Promise<PublicProductResponseDto> {
+  async listForStore(
+    query: ListProductsQueryDto,
+    payload: JwtPayload,
+  ): Promise<ProductListItem[]> {
+    const storeId = payload.storeId;
+    if (!storeId) throw new ForbiddenException("Missing store in token");
+
+    const storeObjectId =
+      typeof storeId === "string" ? new Types.ObjectId(storeId) : storeId;
+
+    const filter: FilterQuery<ProductDocument> = { storeId: storeObjectId };
+    if (query.q?.trim()) {
+      filter.name = { $regex: escapeRegExp(query.q.trim()), $options: "i" };
+    }
+    if (query.category) filter.category = query.category;
+    if (query.type) filter.type = query.type;
+    if (query.status) filter.status = query.status;
+
+    const sort: Record<string, SortOrder> =
+      query.sort === "oldest"
+        ? { updatedAt: "asc" }
+        : query.sort === "name_asc"
+          ? { name: "asc" }
+          : query.sort === "name_desc"
+            ? { name: "desc" }
+            : { updatedAt: "desc" }; // default newest
+
+    // เพจแบบเบา ๆ (ค่าเริ่มต้น limit=100 ถ้าไม่ส่ง page/limit มาก็ยังทำงาน)
+    const limit = Math.min(Math.max(query.limit ?? 100, 1), 1000);
+    const page = Math.max(query.page ?? 1, 1);
+    const skip = (page - 1) * limit;
+
+    // ถ้าต้องการนับจำนวน SKU ต่อชิ้น ให้ใช้ aggregation (ตัวเลือก)
+    if (query.includeSkuCount) {
+      const pipeline = [
+        { $match: filter },
+        { $sort: sort },
+        { $skip: skip },
+        { $limit: limit },
+        {
+          $lookup: {
+            from: "skus",
+            localField: "_id",
+            foreignField: "productId",
+            as: "_skus",
+          },
+        },
+        { $addFields: { skuCount: { $size: "$_skus" } } },
+        {
+          $project: {
+            _skus: 0,
+            name: 1,
+            description: 1,
+            category: 1,
+            type: 1,
+            image: 1,
+            defaultPrice: 1,
+            status: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            skuCount: 1,
+          },
+        },
+      ] as const;
+
+      // ✅ ผลลัพธ์มี type แล้ว ไม่ใช่ any[]
+      const items: ProductListItem[] = await this.productModel
+        .aggregate<ProductListItem>(pipeline as any)
+        .exec();
+
+      return items;
+    }
+
+    // กรณีทั่วไป: find ธรรมดา (เบาและเร็ว)
+    const items = await this.productModel
+      .find(filter)
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .select(
+        "_id name description category type image defaultPrice status createdAt updatedAt",
+      )
+      .lean<ProductListItem[]>()
+      .exec();
+
+    return items; // ← array ธรรมดา
+  }
+
+  async productByProductId(
+    productId: string,
+    payload: JwtPayload,
+  ): Promise<ProductDetailResponseDto> {
+    const storeId = payload.storeId;
+    if (!storeId) throw new ForbiddenException("Missing store in token");
+
     const product = await this.productModel
-      .findOne({
-        _id: id,
-        status: "published",
-      })
-      .populate("storeId", "name slug logoUrl")
+      .findOne({ _id: productId, storeId: new Types.ObjectId(storeId) })
+      .select(
+        "_id name description category type image defaultPrice status createdAt updatedAt",
+      )
+      .lean<ProductLeanRaw>()
       .exec();
 
     if (!product) throw new NotFoundException("Product not found");
 
-    return {
+    // ✅ แปลงเป็น string/ISO อย่างชัดเจน ก่อน return
+    const res: ProductDetailResponseDto = {
       _id: String(product._id),
       name: product.name,
-      image: product.image,
       description: product.description,
-      price: product.price,
       category: product.category,
       type: product.type,
-      store: mapStoreToDto(product.storeId),
-      variants: product.variants?.map(mapVariantToDto) ?? [],
+      image: product.image,
+      defaultPrice: product.defaultPrice,
+      status: product.status,
+      createdAt: new Date(product.createdAt).toISOString(),
+      updatedAt: new Date(product.updatedAt).toISOString(),
     };
+
+    return res;
+  }
+
+  async listSkusByProductId(
+    productId: string,
+    payload: JwtPayload,
+  ): Promise<SkuResponseDto[]> {
+    const storeId = payload.storeId;
+    if (!storeId) throw new ForbiddenException("Missing store in token");
+
+    // ตรวจว่าของร้านนี้จริง
+    const exists = await this.productModel.exists({
+      _id: new Types.ObjectId(productId),
+      storeId: new Types.ObjectId(storeId),
+    });
+    if (!exists) throw new NotFoundException("Product not found");
+
+    const skus = await this.skuModel
+      .find({ productId: new Types.ObjectId(productId) })
+      .select("_id skuCode attributes price image purchasable onHand reserved")
+      .lean<SkuLeanRaw[]>()
+      .exec();
+
+    return skus.map((sku) => ({
+      _id: String(sku._id), // ✅ แปลง ObjectId → string
+      skuCode: sku.skuCode,
+      attributes: sku.attributes ?? {},
+      price: sku.price,
+      image: sku.image,
+      purchasable: sku.purchasable ?? true,
+      onHand: sku.onHand ?? 0,
+      reserved: sku.reserved ?? 0,
+      available: Math.max(0, (sku.onHand ?? 0) - (sku.reserved ?? 0)),
+    }));
   }
 }

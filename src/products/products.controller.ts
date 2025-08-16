@@ -1,84 +1,103 @@
+// products.controller.ts
 import {
+  BadRequestException,
+  Body,
+  ClassSerializerInterceptor,
   Controller,
   Get,
-  Post,
-  Body,
   Param,
+  Post,
   Put,
-  Delete,
   Query,
   UseGuards,
+  UseInterceptors,
+  UsePipes,
+  ValidationPipe,
 } from "@nestjs/common";
-
+import { ProductsService } from "./products.service";
 import { CreateProductDto } from "./dto/create-product.dto";
 import { UpdateProductDto } from "./dto/update-product.dto";
-import { ProductService } from "./products.service";
-import { AuthGuard } from "@nestjs/passport";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
+import { AuthGuard } from "@nestjs/passport";
 import { CurrentUser } from "src/common/current-user.decorator";
+import { ListProductsQueryDto } from "./dto/list-products.query";
+import { isValidObjectId } from "mongoose";
+import { plainToInstance } from "class-transformer";
+import { ProductDetailResponseDto } from "./dto/response-product.dto";
+import { SkuResponseDto } from "./dto/response-skus.dto";
+import { SkuBatchSyncDto } from "./dto/sku-batch.dto";
 
 @Controller("products")
-export class ProductController {
-  constructor(private readonly productService: ProductService) {}
+@UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
+export class ProductsController {
+  constructor(private readonly svc: ProductsService) {}
 
   @Post()
   @UseGuards(AuthGuard("jwt"))
-  createProduct(@Body() dto: CreateProductDto, @CurrentUser() req: JwtPayload) {
-    return this.productService.createProduct(dto, req);
-  }
-
-  @Get()
-  @UseGuards(AuthGuard("jwt"))
-  findAllProduct(
-    @Query() query: Record<string, any>,
-    @CurrentUser() req: JwtPayload,
-  ) {
-    return this.productService.findAllProduct(query, req);
-  }
-
-  @Get(":productId")
-  @UseGuards(AuthGuard("jwt"))
-  findOneProduct(@Param("productId") productId: string) {
-    return this.productService.findOneProduct(productId);
+  create(@Body() dto: CreateProductDto, @CurrentUser() req: JwtPayload) {
+    return this.svc.createWithSkus(dto, req);
   }
 
   @Put(":productId")
   @UseGuards(AuthGuard("jwt"))
-  updateProduct(
-    @Param("productId") productId: string,
+  update(
+    @Param("productId") id: string,
     @Body() dto: UpdateProductDto,
     @CurrentUser() req: JwtPayload,
   ) {
-    return this.productService.updateProduct(productId, dto, req);
+    return this.svc.update(id, dto, req);
   }
 
-  @Delete(":productId")
+  @Put(":productId/skus/batch")
   @UseGuards(AuthGuard("jwt"))
-  removeProduct(
-    @Param("productId") productId: string,
-    @CurrentUser() user: JwtPayload,
+  syncSkus(
+    @Param("productId") id: string,
+    @Body() dto: SkuBatchSyncDto,
+    @CurrentUser() req: JwtPayload,
   ) {
-    return this.productService.removeProduct(productId, user);
+    return this.svc.syncSkus(id, dto, req);
   }
 
-  // @Put(":productId/variant")
-  // @UseGuards(AuthGuard("jwt"))
-  // async updateVariant(
-  //   @Param("productId") productId: string,
-  //   @Body("variant") variantDto: UpdateProductVariantDto,
-  //   @CurrentUser() user: JwtPayload,
-  // ) {
-  //   // ส่งไป service
-  //   return this.productService.updateVariant(productId, variantDto, user);
-  // }
+  @Get()
+  @UseGuards(AuthGuard("jwt"))
+  productList(
+    @Query() query: ListProductsQueryDto,
+    @CurrentUser() req: JwtPayload,
+  ) {
+    return this.svc.listForStore(query, req);
+  }
 
-  // @Delete(":productId/variant/:variantId")
-  // @UseGuards(AuthGuard("jwt"))
-  // async removeVariant(
-  //   @Param("productId") productId: string,
-  //   @Param("variantId") variantId: string,
-  //   @CurrentUser() user: JwtPayload,
-  // ) {
-  //   return this.productService.removeVariant(productId, variantId, user);
-  // }
+  @Get(":productId")
+  @UseGuards(AuthGuard("jwt"))
+  @UseInterceptors(ClassSerializerInterceptor)
+  async productByProductId(
+    @Param("productId") productId: string,
+    @CurrentUser() req: JwtPayload,
+  ) {
+    if (!isValidObjectId(productId)) {
+      throw new BadRequestException("Invalid productId");
+    }
+
+    const doc = await this.svc.productByProductId(productId, req);
+
+    return plainToInstance(ProductDetailResponseDto, doc, {
+      excludeExtraneousValues: true,
+    });
+  }
+
+  @Get(":productId/skus")
+  @UseGuards(AuthGuard("jwt"))
+  @UseInterceptors(ClassSerializerInterceptor)
+  async listSkusByProductId(
+    @Param("productId") productId: string,
+    @CurrentUser() req: JwtPayload,
+  ) {
+    if (!isValidObjectId(productId))
+      throw new BadRequestException("Invalid productId");
+
+    const doc = await this.svc.listSkusByProductId(productId, req);
+    return plainToInstance(SkuResponseDto, doc, {
+      excludeExtraneousValues: true,
+    });
+  }
 }

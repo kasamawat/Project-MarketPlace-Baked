@@ -14,7 +14,7 @@ import { Response } from "express";
 import { AuthGuard } from "@nestjs/passport";
 import { JwtPayload } from "./types/jwt-payload.interface";
 import { CurrentUser } from "src/common/current-user.decorator";
-import { User } from "src/user/user.schema";
+import { User } from "src/user/schemas/user.schema";
 
 @Controller("auth")
 export class AuthController {

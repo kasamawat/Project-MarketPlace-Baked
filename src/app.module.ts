@@ -7,7 +7,10 @@ import { MongooseModule } from "@nestjs/mongoose";
 import { ConfigModule } from "@nestjs/config";
 import { StoreModule } from "./store/store.module";
 import { ProductsModule } from "./products/products.module";
-import { InventoryModule } from './inventory/inventory.module';
+import { SkusModule } from "./skus/skus.module";
+import { InventoryModule } from "./inventory/inventory.module";
+import { ProductPublicModule } from "./products/public/product-public.module";
+import { StorePublicModule } from "./store/public/store-public.module";
 
 @Module({
   imports: [
@@ -16,7 +19,10 @@ import { InventoryModule } from './inventory/inventory.module';
     AuthModule,
     UserModule,
     StoreModule,
+    StorePublicModule,
     ProductsModule,
+    ProductPublicModule,
+    SkusModule,
     InventoryModule,
   ],
   controllers: [AppController],
