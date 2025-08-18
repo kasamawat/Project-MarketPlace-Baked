@@ -117,18 +117,6 @@ export class ProductsService {
     const update = dto.update ?? [];
     const delIds = (dto.delete ?? []).map((id) => new Types.ObjectId(id));
 
-    // ตรวจ attributes ต้องไม่ว่างสำหรับทุกตัว (ตามกติกาของคุณ)
-    // for (const c of create) {
-    //   if (!c.attributes || Object.keys(c.attributes).length === 0) {
-    //     throw new BadRequestException("Each SKU must provide attributes.");
-    //   }
-    // }
-    // for (const u of update) {
-    //   if (!u.attributes || Object.keys(u.attributes).length === 0) {
-    //     throw new BadRequestException("Each SKU must provide attributes.");
-    //   }
-    // }
-
     // เตรียม normalizedAttributes + skuCode
     const createRows = create.map((d) => ({
       productId: new Types.ObjectId(productId),
@@ -272,7 +260,7 @@ export class ProductsService {
           ? { name: "asc" }
           : query.sort === "name_desc"
             ? { name: "desc" }
-            : { updatedAt: "desc" }; // default newest
+            : { createdAt: "desc" }; // default newest
 
     // เพจแบบเบา ๆ (ค่าเริ่มต้น limit=100 ถ้าไม่ส่ง page/limit มาก็ยังทำงาน)
     const limit = Math.min(Math.max(query.limit ?? 100, 1), 1000);

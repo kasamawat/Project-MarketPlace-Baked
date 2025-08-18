@@ -8,6 +8,7 @@ import { PassportModule } from "@nestjs/passport";
 import { JwtModule } from "@nestjs/jwt";
 import { JwtStrategy } from "./strategies/jwt.strategy";
 import { Store, StoreSchema } from "src/store/schemas/store.schema";
+import { CartCommonModule } from "src/cart/common/cart-common.module";
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { Store, StoreSchema } from "src/store/schemas/store.schema";
       { name: Store.name, schema: StoreSchema },
     ]), // 👈 เพิ่มตรงนี้
     UserModule,
+    CartCommonModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],

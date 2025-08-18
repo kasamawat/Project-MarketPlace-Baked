@@ -11,6 +11,7 @@ import { SkusModule } from "./skus/skus.module";
 import { InventoryModule } from "./inventory/inventory.module";
 import { ProductPublicModule } from "./products/public/product-public.module";
 import { StorePublicModule } from "./store/public/store-public.module";
+import { CartModule } from "./cart/cart.module";
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { StorePublicModule } from "./store/public/store-public.module";
     ProductPublicModule,
     SkusModule,
     InventoryModule,
+    CartModule,
   ],
   controllers: [AppController],
   providers: [AppService],

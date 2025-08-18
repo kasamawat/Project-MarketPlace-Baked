@@ -21,6 +21,30 @@ export class AuthService {
     @InjectModel(Store.name) private storeModel: Model<Store>,
   ) {}
 
+  async validateUser(identifier: string, password: string) {
+    const user = await this.userModel.findOne({
+      $or: [{ email: identifier }, { phone: identifier }],
+    });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      throw new UnauthorizedException("Invalid credentials");
+    }
+
+    // หา store ของ user (อาจไม่มี)
+    const store = await this.storeModel
+      .findOne({ ownerId: user._id })
+      .select("_id")
+      .lean();
+
+    const storeId = store?._id ? String(store._id) : null;
+
+    return { user, storeId };
+  }
+
+  issueJwt(payload: JwtPayload) {
+    const secret = process.env.JWT_SECRET!;
+    return jwt.sign(payload, secret, { expiresIn: "7d" });
+  }
+
   async register({
     username,
     email,
@@ -54,40 +78,6 @@ export class AuthService {
     await newUser.save();
 
     return { message: "User created successfully" };
-  }
-
-  async login({
-    identifier,
-    password,
-  }: {
-    identifier: string;
-    password: string;
-  }) {
-    const user = await this.userModel.findOne({
-      $or: [{ email: identifier }, { phone: identifier }],
-    });
-
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      throw new UnauthorizedException("Invalid credentials");
-    }
-
-    // ดึง store จาก user._id (ownerId)
-    const store = await this.storeModel.findOne({ ownerId: user._id });
-
-    const token = jwt.sign(
-      {
-        userId: user._id,
-        username: user.username,
-        email: user.email,
-        storeId: store?._id ?? null,
-      },
-      process.env.JWT_SECRET!,
-      {
-        expiresIn: "7d",
-      },
-    );
-
-    return token;
   }
 
   async getProfile(payload: JwtPayload) {

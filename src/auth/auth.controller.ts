@@ -6,19 +6,25 @@ import {
   Res,
   Get,
   UseGuards,
-  Request,
   Put,
+  Req,
 } from "@nestjs/common";
 import { AuthService } from "./auth.service";
-import { Response } from "express";
+import { Response, Request } from "express";
 import { AuthGuard } from "@nestjs/passport";
 import { JwtPayload } from "./types/jwt-payload.interface";
 import { CurrentUser } from "src/common/current-user.decorator";
 import { User } from "src/user/schemas/user.schema";
+import { CartResolverService } from "src/cart/common/cart-resolver.service";
+import { LoginDto } from "./dto/auth.dto";
+import { setAuthCookie } from "./utils/auth-helper";
 
 @Controller("auth")
 export class AuthController {
-  constructor(private authService: AuthService) { }
+  constructor(
+    private authService: AuthService,
+    private cartService: CartResolverService,
+  ) {}
 
   @Post("register")
   register(
@@ -29,19 +35,41 @@ export class AuthController {
 
   @Post("login")
   async login(
-    @Body() body: { identifier: string; password: string },
+    @Body() dto: LoginDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const token = await this.authService.login(body);
+    const { user, storeId } = await this.authService.validateUser(
+      dto.identifier,
+      dto.password,
+    );
 
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production", // ใช้ https ใน production
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 วัน
+    const token = this.authService.issueJwt({
+      userId: String(user._id),
+      username: user.username,
+      email: user.email,
+      storeId: String(storeId), // string | null
     });
 
-    return { message: "Login success" };
+    // ✅ ตั้ง cookie ชื่อ 'token' ให้ JwtStrategy อ่านได้
+    setAuthCookie(res, token, 7 * 24 * 60 * 60); // 7 วัน
+
+    // 🔁 ถ้ามี guest cart ใน cookie -> รวมเข้ากับ cart ของ user แล้วเคลียร์ cookie cartId
+    await this.cartService.mergeGuestCartToUser({
+      userId: String(user._id),
+      cartKey: (req.cookies?.cartId as string) ?? null,
+      clearCookie: () => res.clearCookie("cartId", { path: "/" }),
+    });
+
+    return {
+      ok: true,
+      user: {
+        id: String(user._id),
+        username: user.username,
+        email: user.email,
+        storeId,
+      },
+    };
   }
 
   @Post("logout")
