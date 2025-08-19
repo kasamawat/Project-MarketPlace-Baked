@@ -3,7 +3,7 @@ import mongoose, { Document } from "mongoose";
 
 export type StoreDocument = Store & Document;
 
-@Schema()
+@Schema({ timestamps: true })
 export class Store {
   @Prop({ required: true })
   name: string;
