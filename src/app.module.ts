@@ -12,10 +12,19 @@ import { InventoryModule } from "./inventory/inventory.module";
 import { ProductPublicModule } from "./products/public/product-public.module";
 import { StorePublicModule } from "./store/public/store-public.module";
 import { CartModule } from "./cart/cart.module";
+import { OrdersController } from "./orders/orders.controller";
+import { OrdersModule } from "./orders/orders.module";
+import { PaymentsController } from "./payments/payments.controller";
+import { PaymentsModule } from "./payments/payments.module";
+import { MessagingModule } from "./messaging/messaging.module";
+import { RealtimeModule } from "./realtime/realtime.module";
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: [".env.local", ".env"],
+    }),
     MongooseModule.forRoot(process.env.MONGODB_URI!),
     AuthModule,
     UserModule,
@@ -26,8 +35,12 @@ import { CartModule } from "./cart/cart.module";
     SkusModule,
     InventoryModule,
     CartModule,
+    OrdersModule,
+    PaymentsModule,
+    MessagingModule,
+    RealtimeModule,
   ],
-  controllers: [AppController],
+  controllers: [AppController, OrdersController, PaymentsController],
   providers: [AppService],
 })
 export class AppModule {}

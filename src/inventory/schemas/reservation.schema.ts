@@ -8,6 +8,10 @@ export type ReservationDocument = Reservation & Document;
 export class Reservation {
   @Prop({ type: mongoose.Schema.Types.ObjectId, ref: "Sku", required: true })
   skuId!: Types.ObjectId;
+  @Prop({ type: mongoose.Schema.Types.ObjectId, ref: "Sku", required: true })
+  productId!: Types.ObjectId;
+  @Prop({ type: mongoose.Schema.Types.ObjectId, ref: "Sku", required: true })
+  storeId!: Types.ObjectId;
   @Prop({ required: true }) qty!: number;
   @Prop({ required: true }) expiresAt!: Date;
 

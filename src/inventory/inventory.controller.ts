@@ -30,7 +30,7 @@ export class InventoryController {
   @Post("reserve")
   @UseGuards(AuthGuard("jwt"))
   reserve(@Body() dto: ReserveDto) {
-    return this.inv.reserve(dto.skuId, dto.qty, {
+    return this.inv.reserve(dto.skuId, dto.productId, dto.storeId, dto.qty, {
       cartId: dto.cartId,
       userId: dto.userId,
       ttlMinutes: dto.ttlMinutes,

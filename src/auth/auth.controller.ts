@@ -48,7 +48,7 @@ export class AuthController {
       userId: String(user._id),
       username: user.username,
       email: user.email,
-      storeId: String(storeId), // string | null
+      storeId: storeId == null ? "" : String(storeId), // string | null
     });
 
     // ✅ ตั้ง cookie ชื่อ 'token' ให้ JwtStrategy อ่านได้

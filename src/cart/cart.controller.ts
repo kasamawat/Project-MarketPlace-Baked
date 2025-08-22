@@ -52,10 +52,10 @@ export class CartController {
     @Body() dto: AddCartItemDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-    @CurrentUser() user: JwtPayload | null,
+    @CurrentUser() payload: JwtPayload | null,
   ) {
     const cart = await this.svc.getOrCreateCart({
-      userId: user?.userId,
+      userId: payload?.userId,
       cartKey: String(req?.cookies?.cartId),
       setCookie: (key, val, maxAgeSec) => setCartCookie(res, val, maxAgeSec),
     });
@@ -70,10 +70,10 @@ export class CartController {
     @Body() dto: UpdateCartQtyDto,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-    @CurrentUser() user: JwtPayload | null,
+    @CurrentUser() payload: JwtPayload | null,
   ) {
     const cart = await this.svc.getOrCreateCart({
-      userId: user?.userId,
+      userId: payload?.userId,
       cartKey: String(req?.cookies?.cartId),
       setCookie: (key, val, maxAgeSec) => setCartCookie(res, val, maxAgeSec),
     });
@@ -87,10 +87,10 @@ export class CartController {
     @Param("itemId") itemId: string,
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-    @CurrentUser() user: JwtPayload | null,
+    @CurrentUser() payload: JwtPayload | null,
   ) {
     const cart = await this.svc.getOrCreateCart({
-      userId: user?.userId,
+      userId: payload?.userId,
       cartKey: String(req?.cookies?.cartId),
       setCookie: (key, val, maxAgeSec) => setCartCookie(res, val, maxAgeSec),
     });
@@ -103,10 +103,10 @@ export class CartController {
   async clear(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-    @CurrentUser() user: JwtPayload | null,
+    @CurrentUser() payload: JwtPayload | null,
   ) {
     const cart = await this.svc.getOrCreateCart({
-      userId: user?.userId,
+      userId: payload?.userId,
       cartKey: String(req?.cookies?.cartId),
       setCookie: (key, val, maxAgeSec) => setCartCookie(res, val, maxAgeSec),
     });
