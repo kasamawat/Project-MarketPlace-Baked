@@ -1,4 +1,5 @@
 import { Types } from "mongoose";
+import { ReservationStatus } from "../schemas/reservation.schema";
 
 export type ReleaseMeta = { reason?: string; referenceId?: string };
 
@@ -8,9 +9,13 @@ export type ReservationLean = {
   productId: Types.ObjectId;
   storeId: Types.ObjectId;
   qty: number;
-  cartId?: string;
-  userId?: string;
-  expiresAt: Date;
+  status: ReservationStatus;
+  masterOrderId?: Types.ObjectId;
+  cartId?: Types.ObjectId;
+  userId?: Types.ObjectId | string;
+  expiresAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
 export type AggRow = {

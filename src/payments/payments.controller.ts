@@ -13,6 +13,9 @@ import { CreateIntentArgs, CreateIntentResult } from "./payment.types";
 import { CreateIntentDto } from "./dto/create-intent.dto";
 import { Request } from "express";
 import { OptionalJwtAuthGuard } from "src/auth/strategies/optional-jwt.strategy";
+
+type PaymentMethod = "card" | "promptpay" | "cod";
+
 @ApiTags("Payments")
 @Controller("payments")
 export class PaymentsController {
@@ -23,7 +26,7 @@ export class PaymentsController {
     @Body() dto: CreateIntentDto,
   ): Promise<CreateIntentResult> {
     const args: CreateIntentArgs = {
-      orderId: dto.orderId,
+      masterOrderId: dto.masterOrderId,
       amount: dto.amount, // บาท → เดี๋ยวคูณ 100 ใน service
       customerEmail: dto.customerEmail,
       method: dto.method,
@@ -36,7 +39,12 @@ export class PaymentsController {
   @Post("ensure-intent")
   @UseGuards(OptionalJwtAuthGuard) // แล้วแต่ระบบ auth
   async ensureIntent(
-    @Body() dto: { orderId: string; method: "automatic" | "promptpay" },
+    @Body()
+    dto: {
+      masterOrderId: string;
+      method: Exclude<PaymentMethod, "cod">;
+      customerEmail?: string;
+    },
   ) {
     return this.svc.ensureIntent(dto);
   }
@@ -58,13 +66,15 @@ export class PaymentsController {
       process.env.STRIPE_WEBHOOK_SECRET!, // whsec_xxx
     );
 
+    console.log(`Stripe HOOK Type: ${event.type}`);
+
     await this.svc.handleEvent(event);
     return { received: true };
   }
 
-  @Post("test")
-  @HttpCode(200)
-  async testEvent() {
-    return this.svc.testEvent();
-  }
+  // @Post("test")
+  // @HttpCode(200)
+  // async testEvent() {
+  //   return this.svc.testEvent();
+  // }
 }

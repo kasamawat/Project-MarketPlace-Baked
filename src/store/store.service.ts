@@ -130,4 +130,19 @@ export class StoreService {
 
     return updated;
   }
+
+  async assertOwner(userId: string, storeId: string) {
+    const userIdObj = new Types.ObjectId(userId);
+    const storeIdObj = new Types.ObjectId(storeId);
+
+    const store = await this.storeModel
+      .findOne({ ownerId: userIdObj, _id: storeIdObj })
+      .lean();
+
+    if (!store) {
+      throw new NotFoundException("");
+    }
+
+    return true;
+  }
 }

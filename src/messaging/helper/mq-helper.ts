@@ -3,6 +3,7 @@ import {
   PaymentsProcessingPayload,
   PaymentsSucceededPayload,
   PaymentsFailedPayload,
+  PaymentsCanceledPayload,
 } from "../mq.types";
 
 export function parseAmqpUrls(env?: string | null): string[] | null {
@@ -26,10 +27,10 @@ export function safeJsonParse(s: string): unknown {
   }
 }
 
-/** ดึง orderId จาก payload ที่เป็น object */
-export function getOrderIdFromPayload(payload: unknown): string | null {
-  if (payload && typeof payload === "object" && "orderId" in payload) {
-    const v = payload.orderId;
+/** ดึง masterOrderId จาก payload ที่เป็น object */
+export function getMasterOrderIdFromPayload(payload: unknown): string | null {
+  if (payload && typeof payload === "object" && "masterOrderId" in payload) {
+    const v = payload.masterOrderId;
     return typeof v === "string" && v.trim() ? v : null;
   }
   return null;
@@ -44,7 +45,7 @@ export function isProcessingPayload(
 ): x is PaymentsProcessingPayload {
   return (
     isObj(x) &&
-    typeof x.orderId === "string" &&
+    typeof x.masterOrderId === "string" &&
     typeof x.paymentIntentId === "string"
   );
 }
@@ -52,7 +53,15 @@ export function isProcessingPayload(
 export function isSucceededPayload(x: unknown): x is PaymentsSucceededPayload {
   return (
     isObj(x) &&
-    typeof x.orderId === "string" &&
+    typeof x.masterOrderId === "string" &&
+    typeof x.paymentIntentId === "string"
+  );
+}
+
+export function isCanceledPayload(x: unknown): x is PaymentsCanceledPayload {
+  return (
+    isObj(x) &&
+    typeof x.masterOrderId === "string" &&
     typeof x.paymentIntentId === "string"
   );
 }
@@ -60,7 +69,7 @@ export function isSucceededPayload(x: unknown): x is PaymentsSucceededPayload {
 export function isFailedPayload(x: unknown): x is PaymentsFailedPayload {
   return (
     isObj(x) &&
-    typeof x.orderId === "string" &&
+    typeof x.masterOrderId === "string" &&
     typeof x.paymentIntentId === "string"
   );
 }

@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-misused-promises */
+/* eslint-disable @typescript-eslint/require-await */
 // payments-events.consumer.ts
 import {
   Inject,
@@ -15,16 +17,18 @@ import type {
 import { MQ_CONNECTION } from "./mq.tokens";
 import { bindPaymentsTopology, QUEUES } from "./mq.topology";
 import {
-  getOrderIdFromPayload,
+  // ปรับ helper ให้รองรับ masterOrderId
+  isCanceledPayload,
   isFailedPayload,
   isProcessingPayload,
   isSucceededPayload,
   pickRetryQueue,
   safeJsonParse,
+  // 👉 เพิ่ม helper ใหม่ (ดูโน้ตท้ายไฟล์)
+  getMasterOrderIdFromPayload,
 } from "./helper/mq-helper";
 import { SseBus } from "src/realtime/sse.bus";
 
-// options set max retry
 const MAX_RETRIES = 5;
 
 @Injectable()
@@ -37,26 +41,19 @@ export class PaymentsEventsConsumer implements OnModuleInit, OnModuleDestroy {
     private readonly sseBus: SseBus,
   ) {}
 
-  // eslint-disable-next-line @typescript-eslint/require-await
   async onModuleInit() {
     if (!this.conn) {
       this.logger.warn("AMQP disabled. Consumer will not start.");
       return;
     }
 
-    // ใช้ ChannelWrapper ของ amqp-connection-manager (มี auto-reconnect)
     this.channelWrapper = this.conn.createChannel({
       setup: async (ch: ConfirmChannel) => {
-        // 1) สร้าง/ผูก Exchange/Queue/Binding (ควรมี retry & DLQ ใน topology)
         await bindPaymentsTopology(ch);
-
-        // 2) จำกัดงานค้างต่อ consumer
         await ch.prefetch(10);
 
-        // 3) เริ่ม consume
         await ch.consume(
-          QUEUES.ORDER,
-          // eslint-disable-next-line @typescript-eslint/no-misused-promises
+          QUEUES.ORDER, // ใช้คิวเดิม ถ้าเปลี่ยน topology ค่อยอัปเดตชื่อคิว
           (msg: ConsumeMessage) => this.handleMessage(ch, msg),
           { noAck: false },
         );
@@ -66,13 +63,7 @@ export class PaymentsEventsConsumer implements OnModuleInit, OnModuleDestroy {
     this.logger.log("PaymentsEventsConsumer is ready.");
   }
 
-  /**
-   * ตัวประมวลผลข้อความจากคิว
-   */
-  // eslint-disable-next-line @typescript-eslint/require-await
   private handleMessage = async (ch: ConfirmChannel, msg: ConsumeMessage) => {
-    // const routingKey = msg.fields.routingKey;
-    // const deliveryTag = msg.fields.deliveryTag;
     const { routingKey, deliveryTag } = msg.fields;
     const headers = msg.properties.headers ?? {};
     const messageId = String(
@@ -82,25 +73,23 @@ export class PaymentsEventsConsumer implements OnModuleInit, OnModuleDestroy {
     const retryCount = (headers["x-retries"] as number) ?? 0;
 
     try {
-      // change payload to JSON
       const payload = safeJsonParse(contentStr);
-      // (option) check pattern
-      const orderId = getOrderIdFromPayload(payload);
+
+      // ✅ รองรับทั้ง masterOrderId และ orderId (legacy)
+      const masterOrderId = getMasterOrderIdFromPayload?.(payload) || undefined;
 
       this.logger.log(
-        `Consume ${routingKey} [msgId=${messageId} try=${retryCount}] orderId=${orderId}`,
+        `Consume ${routingKey} [msgId=${messageId} try=${retryCount}] masterOrderId=${masterOrderId ?? "-"}`,
       );
 
-      // ถ้าไม่มี orderId ไม่ต้องพยายามต่อ (กัน type error + ขยะ)
-      if (!orderId) {
+      if (!masterOrderId) {
         this.logger.warn(
-          `Skip message without orderId. routingKey=${routingKey} msgId=${messageId}`,
+          `Skip message without masterOrderId. routingKey=${routingKey} msgId=${messageId}`,
         );
         ch.ack(msg);
         return;
       }
 
-      // TODO: ใส่ business logic ที่นี่
       switch (true) {
         case routingKey === "payments.processing": {
           if (!isProcessingPayload(payload)) {
@@ -110,9 +99,16 @@ export class PaymentsEventsConsumer implements OnModuleInit, OnModuleDestroy {
             ch.ack(msg);
             break;
           }
-          // TODO: update read model / notify
+          // ตัวอย่าง push ให้หน้าชำระเงินโชว์ว่ากำลังประมวลผล
+          this.sseBus.push({
+            masterOrderId,
+            status: "pending_payment",
+            paymentIntentId: payload.paymentIntentId,
+            at: new Date().toISOString(),
+          });
           break;
         }
+
         case routingKey === "payments.succeeded": {
           if (!isSucceededPayload(payload)) {
             this.logger.warn(
@@ -121,20 +117,43 @@ export class PaymentsEventsConsumer implements OnModuleInit, OnModuleDestroy {
             ch.ack(msg);
             break;
           }
-          const { paymentIntentId, chargeId, paidAmount, paidCurrency } =
-            payload;
+
+          const paidAmount = payload.paidAmount ?? undefined; // อาจไม่มีจาก publisher
+          const paidCurrency = payload.paidCurrency ?? "THB";
+          const paymentIntentId = payload.paymentIntentId;
+          const chargeId = payload.chargeId;
 
           this.sseBus.push({
-            orderId, // ✅ ตอนนี้เป็น string แน่นอน
+            masterOrderId, // ✅ ใช้ masterOrderId เสมอ
             status: "paid",
             paidAt: new Date().toISOString(),
-            paidAmount: paidAmount ?? undefined,
-            paidCurrency: paidCurrency ?? "THB",
+            paidAmount,
+            paidCurrency,
             paymentIntentId,
             chargeId,
           });
+          this.sseBus.complete(masterOrderId); // ปิดสตรีมของคำสั่งซื้อนี้
           break;
         }
+
+        case routingKey === "payments.canceled": {
+          if (!isCanceledPayload(payload)) {
+            this.logger.warn(
+              `Malformed payload for payments.canceled: ${contentStr}`,
+            );
+            ch.ack(msg);
+            break;
+          }
+          const { reason } = payload;
+          this.sseBus.push({
+            masterOrderId,
+            status: "canceled",
+            reason: reason ?? "canceled",
+          });
+          this.sseBus.complete(masterOrderId);
+          break;
+        }
+
         case routingKey === "payments.failed": {
           if (!isFailedPayload(payload)) {
             this.logger.warn(
@@ -143,25 +162,30 @@ export class PaymentsEventsConsumer implements OnModuleInit, OnModuleDestroy {
             ch.ack(msg);
             break;
           }
-          // TODO: บันทึกเหตุผล, แจ้งทีมซัพพอร์ต ฯลฯ
+          // สามารถแจ้งเตือนเฉพาะ admin/ops ที่หน้า backend
+          this.sseBus.push({
+            masterOrderId,
+            status: "failed",
+            error: payload.error ?? "payment_failed",
+          });
+          // ไม่ complete stream เผื่อ user รีลองจ่าย
           break;
         }
+
         default: {
-          // routingKey อื่นที่ยังไม่รองรับ
           this.logger.debug(`Unhandled routingKey: ${routingKey}`);
           break;
         }
       }
 
-      ch.ack(msg); // สำเร็จ
+      ch.ack(msg);
     } catch (err) {
       this.logger.error(
-        `Handler error on ${routingKey} [msgId=${messageId} try=${retryCount}] : ${
+        `Handler error on ${msg.fields.routingKey} [msgId=${messageId} try=${retryCount}] : ${
           (err as Error)?.message || err
         }`,
       );
 
-      // รวมทั้งหมดให้ retry ได้ MAX_RETRIES ครั้ง (0..4) แล้วค่อย DLQ
       if (retryCount < MAX_RETRIES) {
         const retryQueue = pickRetryQueue(retryCount);
         const publishOpts: Options.Publish = {
@@ -171,10 +195,9 @@ export class PaymentsEventsConsumer implements OnModuleInit, OnModuleDestroy {
           headers: { ...headers, "x-retries": retryCount + 1 },
         };
         ch.sendToQueue(retryQueue, msg.content, publishOpts);
-        ch.ack(msg); // ack ต้นฉบับ เพราะเราโยนไปคิว retry แล้ว
+        ch.ack(msg);
       } else {
-        // ครบโควต้าแล้ว -> ปล่อยให้ไป DLQ (ต้องตั้ง DLX ที่คิวหลักไว้)
-        ch.nack(msg, false, false); // requeue=false => dead-letter ไป DLQ
+        ch.nack(msg, false, false); // DLQ
       }
     }
   };

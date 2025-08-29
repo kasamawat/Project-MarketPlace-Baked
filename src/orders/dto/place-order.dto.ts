@@ -28,3 +28,12 @@ export class PlaceOrderDto {
 
   // (ไม่รับรายการสินค้า—ดึงจาก cart ฝั่ง BE เพื่อความปลอดภัย)
 }
+
+export type CheckoutResponseDtoNew = {
+  masterOrderId: string;
+  storeOrders: Array<{ storeOrderId: string; storeId: string }>;
+  amount: number;
+  currency: string;
+  clientSecret?: string;
+  expiresAt?: Date;
+};

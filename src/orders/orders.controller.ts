@@ -1,7 +1,6 @@
 import {
   Body,
   Controller,
-  ForbiddenException,
   Headers,
   Param,
   Post,
@@ -12,6 +11,8 @@ import {
   MessageEvent,
   Get,
   NotFoundException,
+  Query,
+  BadRequestException,
 } from "@nestjs/common";
 import { Request, Response } from "express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
@@ -22,9 +23,18 @@ import { CurrentUser } from "src/common/current-user.decorator";
 import { setCartCookie } from "src/cart/utils/cart-helper";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
 import { SseBus } from "src/realtime/sse.bus";
-import { interval, map, merge, Observable } from "rxjs";
+import {
+  filter,
+  ignoreElements,
+  interval,
+  map,
+  merge,
+  Observable,
+  share,
+  take,
+} from "rxjs";
 import { AuthGuard } from "@nestjs/passport";
-import { toClient } from "./utils/orders-helper";
+import { ListOrdersDto } from "./dto/list-orders.dto";
 
 @ApiTags("Orders")
 @Controller("orders")
@@ -44,7 +54,11 @@ export class OrdersController {
     @Res({ passthrough: true }) res: Response,
     @CurrentUser() payload: JwtPayload | null,
   ) {
-    const out = await this.svc.placeOrderFromCart({
+    if (idemKey && idemKey.length > 120) {
+      throw new BadRequestException("Invalid Idempotency-Key");
+    }
+
+    const out = await this.svc.checkoutMaster({
       dto,
       userId: payload?.userId || "",
       cartKey: String(req?.cookies?.cartId),
@@ -55,46 +69,93 @@ export class OrdersController {
     return out;
   }
 
-  @Get(":orderId")
+  @Get()
   @UseGuards(AuthGuard("jwt"))
-  async getOne(
-    @Param("orderId") orderId: string,
-    @CurrentUser() payload: JwtPayload,
+  async listMyOrders(
+    @Query() q: ListOrdersDto,
+    @CurrentUser() user: JwtPayload,
   ) {
-    await this.svc.userCanSee(payload.userId, orderId);
-    const order = await this.svc.findById(orderId); // lean or doc
-    if (!order) throw new NotFoundException();
-    return toClient(order); // เพิ่มฟิลด์ด้านล่าง
+    return this.svc.listForBuyer(user.userId, q);
   }
 
-  @Sse(":orderId/stream")
+  @Get(":masterOrderId/result")
+  @UseGuards(AuthGuard("jwt"))
+  async getBuyerMasterOrder(
+    @Param("masterOrderId") masterOrderId: string,
+    @CurrentUser() payload: JwtPayload,
+  ) {
+    await this.svc.userCanSeeMaster(payload.userId, masterOrderId);
+    const data = await this.svc.getBuyerMasterOrder(masterOrderId);
+    if (!data) throw new NotFoundException();
+    return data; // = toClient() แล้วใน service
+  }
+
+  @Get(":masterOrderId/:storeOrderId/list")
+  @UseGuards(AuthGuard("jwt"))
+  async getBuyerOrderDetail(
+    @Param("masterOrderId") masterOrderId: string,
+    @Param("storeOrderId") storeOrderId: string,
+    @CurrentUser() payload: JwtPayload,
+  ) {
+    await this.svc.userCanSeeMaster(payload.userId, masterOrderId);
+    await this.svc.userCanSeeStore(payload.userId, storeOrderId);
+    const data = await this.svc.getBuyerOrderDetail(
+      masterOrderId,
+      storeOrderId,
+    );
+    if (!data) throw new NotFoundException();
+    return data; // = toClient() แล้วใน service
+  }
+
+  /** คืนข้อมูลที่หน้า /checkout/pay ต้องใช้ */
+  @Get(":masterOrderId/pay-meta")
+  @UseGuards(OptionalJwtAuthGuard) // guest ก็เรียกได้ แต่จะบล็อคถ้า order มี userId ไม่ตรง
+  async getPayMetaForMaster(
+    @Param("masterOrderId") masterOrderId: string,
+    @CurrentUser() payload: JwtPayload | null,
+  ) {
+    const userId = payload?.userId || undefined;
+    return this.svc.getPayMetaForMaster(masterOrderId, userId);
+  }
+
+  @Sse(":masterOrderId/stream")
   @UseGuards(AuthGuard("jwt"))
   async stream(
-    @Param("orderId") orderId: string,
+    @Param("masterOrderId") masterOrderId: string,
     @Res() res: Response,
     @CurrentUser() payload: JwtPayload,
   ): Promise<Observable<MessageEvent>> {
     // ✅ auth/ownership check (สำคัญ)
     const userId = payload.userId; // แล้วแต่ guard ของคุณ
-    const canSee = await this.svc.userCanSee(userId, orderId);
-    if (!canSee) throw new ForbiddenException();
+    await this.svc.userCanSeeMaster(userId, masterOrderId);
 
     // ✅ ตั้ง header กัน proxy buffer
     res.setHeader("X-Accel-Buffering", "no"); // nginx
     res.setHeader("Cache-Control", "no-cache, no-transform");
 
-    // ✅ ส่ง heartbeat ทุก 15s กัน idle timeout
-    const heartbeat$: Observable<MessageEvent> = interval(15000).pipe(
-      map((): MessageEvent => ({ type: "ping", data: "keepalive" })),
-    );
-
     // ✅ stream สถานะของ order จาก bus (หรือ change stream)
     // stream จาก bus (หรือ change stream) -> ห่อเป็น MessageEvent
-    const order$: Observable<MessageEvent> = this.bus.streamOrder(orderId).pipe(
-      map((payload): MessageEvent => ({ type: "status", data: payload })), // ไม่ต้อง stringify
+    const order$ = this.bus.streamOrder(masterOrderId).pipe(
+      map((payload): MessageEvent => ({ type: "order", data: payload })),
+      share(), // ไม่ต้อง stringify
     );
 
+    // when find last status -> close stream
+    const terminal$ = order$.pipe(
+      filter((e) => {
+        if (!e?.data) return false;
+        const d = typeof e.data === "string" ? { status: e.data } : e.data;
+        const s = (d as Record<string, string>).status as string | undefined;
+        return s === "paid" || s === "canceled" || s === "expired";
+      }),
+      take(1),
+    );
+
+    // ✅ ส่ง heartbeat ทุก 15s กัน idle timeout
+    const heartbeat$ = interval(15000).pipe(
+      map((): MessageEvent => ({ type: "keepalive", data: "1" })),
+    );
     // ส่งรวม
-    return merge(heartbeat$, order$);
+    return merge(heartbeat$, order$, terminal$.pipe(ignoreElements()));
   }
 }

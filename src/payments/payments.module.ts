@@ -16,18 +16,19 @@ import {
   PaymentEvent,
   PaymentEventSchema,
 } from "./schemas/payment-event.schema";
-import { Order, OrderSchema } from "src/orders/schemas/order.schema";
+import {
+  MasterOrder,
+  MasterOrderSchema,
+} from "src/orders/schemas/master-order.schema";
 
 @Module({
   imports: [
     ConfigModule,
     MongooseModule.forFeature([
       { name: WebhookEvent.name, schema: WebhookEventSchema },
-    ]),
-    MongooseModule.forFeature([
       { name: PaymentEvent.name, schema: PaymentEventSchema },
+      { name: MasterOrder.name, schema: MasterOrderSchema },
     ]),
-    MongooseModule.forFeature([{ name: Order.name, schema: OrderSchema }]),
     forwardRef(() => OrdersModule), // ← ให้เห็น OrdersService
     InventoryModule,
     MessagingModule,

@@ -4,6 +4,7 @@ import {
   Get,
   Post,
   Put,
+  Query,
   Res,
   UseGuards,
 } from "@nestjs/common";
@@ -15,10 +16,15 @@ import { CurrentUser } from "src/common/current-user.decorator";
 import { Response } from "express";
 import { UpdateStoreInfoDto } from "./dto/update-store-info.dto";
 import { UpdateStoreBankDto } from "./dto/update-store-bank.dto";
+import { StoreOrdersDto } from "./dto/store-orders.dto";
+import { OrdersService } from "src/orders/orders.service";
 
 @Controller("store")
 export class StoreController {
-  constructor(private readonly storeService: StoreService) {}
+  constructor(
+    private readonly storeService: StoreService,
+    private readonly ordersService: OrdersService,
+  ) {}
 
   @Post("register")
   @UseGuards(AuthGuard("jwt"))
@@ -68,5 +74,17 @@ export class StoreController {
     @CurrentUser() req: JwtPayload,
   ) {
     return await this.storeService.updateStoreBank(dto, req);
+  }
+
+  @Get("orders")
+  @UseGuards(AuthGuard("jwt"))
+  async listStoreOrders(
+    @Query() q: StoreOrdersDto,
+    @CurrentUser() req: JwtPayload,
+  ) {
+    // Check user Own this store
+    await this.storeService.assertOwner(req.userId, String(req.storeId));
+
+    return await this.ordersService.listStoreOrders(q, String(req.storeId));
   }
 }

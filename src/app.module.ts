@@ -18,9 +18,11 @@ import { PaymentsController } from "./payments/payments.controller";
 import { PaymentsModule } from "./payments/payments.module";
 import { MessagingModule } from "./messaging/messaging.module";
 import { RealtimeModule } from "./realtime/realtime.module";
+import { ScheduleModule } from "@nestjs/schedule";
 
 @Module({
   imports: [
+    ScheduleModule.forRoot(),
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: [".env.local", ".env"],

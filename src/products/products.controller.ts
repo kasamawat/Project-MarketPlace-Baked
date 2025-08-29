@@ -4,6 +4,7 @@ import {
   Body,
   ClassSerializerInterceptor,
   Controller,
+  Delete,
   Get,
   Param,
   Post,
@@ -56,6 +57,15 @@ export class ProductsController {
     @CurrentUser() req: JwtPayload,
   ) {
     return this.svc.syncSkus(id, dto, req);
+  }
+
+  @Delete(":productId")
+  @UseGuards(AuthGuard("jwt"))
+  deleteProduct(
+    @Param("productId") productId: string,
+    @CurrentUser() req: JwtPayload,
+  ) {
+    return this.svc.deleteProduct(productId, req);
   }
 
   @Get()

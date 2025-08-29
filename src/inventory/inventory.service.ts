@@ -6,7 +6,7 @@ import {
   ForbiddenException,
 } from "@nestjs/common";
 import { InjectModel, InjectConnection } from "@nestjs/mongoose";
-import { Model, Types, Connection, ClientSession } from "mongoose";
+import { Model, Types, Connection, ClientSession, FilterQuery } from "mongoose";
 import {
   InventoryLedger,
   InventoryLedgerDocument,
@@ -16,26 +16,35 @@ import { Sku, SkuDocument } from "src/skus/schemas/sku-schema";
 import { AdjustInventoryDto } from "./dto/adjust-inventory.dto";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
 import { SkuLeanRaw } from "src/products/dto/response-skus.dto";
-import { Order, OrderDocument } from "src/orders/schemas/order.schema";
 import { InventoryResolverService } from "./common/inventory-resolver.service";
 import {
   buildCommitCondition,
   buildCommitUpdate,
-  IncUpdate,
-  SkuCond,
 } from "./helper/inventory-helper";
-import { AggRow, ReleaseMeta, ReservationLean } from "./types/inventory.types";
+import { ReservationLean } from "./types/inventory.types";
+import {
+  MasterOrder,
+  MasterOrderDocument,
+} from "src/orders/schemas/master-order.schema";
+import {
+  StoreOrder,
+  StoreOrderDocument,
+} from "src/orders/schemas/store-order.schema";
+import { StoreOrderItemLean } from "./helper/store-order-items-lean";
 
 @Injectable()
 export class InventoryService {
-  [x: string]: any;
   constructor(
+    @InjectConnection() private readonly conn: Connection,
     @InjectModel(InventoryLedger.name)
     private ledgerModel: Model<InventoryLedgerDocument>,
     @InjectModel(Reservation.name)
     private reservationModel: Model<ReservationDocument>,
     @InjectModel(Sku.name) private skuModel: Model<SkuDocument>,
-    @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
+    @InjectModel(StoreOrder.name)
+    private readonly storeOrderModel: Model<StoreOrderDocument>,
+    @InjectModel(MasterOrder.name)
+    private readonly masterOrderModel: Model<MasterOrderDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly inventoryResolverService: InventoryResolverService,
   ) {}
@@ -59,6 +68,7 @@ export class InventoryService {
     skuId: string,
     productId: string,
     storeId: string,
+    masterOrderId: string,
     qty: number,
     opts: { cartId?: string; userId?: string; ttlMinutes?: number } = {},
     session?: ClientSession,
@@ -83,35 +93,51 @@ export class InventoryService {
       }
 
       try {
-        // 2) ledger
+        // 2) ledger create RESERVE status
         await this.ledgerModel.create(
           [
             {
               skuId: new Types.ObjectId(skuId),
               productId: new Types.ObjectId(productId),
               storeId: new Types.ObjectId(storeId),
+              masterOrderId: new Types.ObjectId(masterOrderId),
               op: "RESERVE",
               qty,
               referenceType: "cart",
-              referenceId: opts.cartId,
+              referenceId: new Types.ObjectId(opts.cartId),
             },
           ],
           s ? { session: s } : undefined,
         );
 
-        // 3) reservation
+        // 3) create reservation
+        const ttlMinutes = opts.ttlMinutes ?? 20;
+        const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
+
+        // TTL safety-net: ลบจริงหลังจากหมดสิทธิ์ถือจองไปอีก 6 ชม.
+        const PURGE_BUFFER_MS = 6 * 60 * 60 * 1000;
+        const purgeAfter = new Date(expiresAt.getTime() + PURGE_BUFFER_MS);
+
+        // แปลงเฉพาะเมื่อมีค่า (guest/anon อาจไม่มี userId)
+        const cartIdObj = opts.cartId
+          ? new Types.ObjectId(opts.cartId)
+          : undefined;
+        const userIdObj = opts.userId
+          ? new Types.ObjectId(opts.userId)
+          : undefined;
+
         await this.reservationModel.create(
           [
             {
               skuId: new Types.ObjectId(skuId),
               productId: new Types.ObjectId(productId),
               storeId: new Types.ObjectId(storeId),
+              masterOrderId: new Types.ObjectId(masterOrderId),
               qty,
-              cartId: opts.cartId,
-              userId: opts.userId,
-              expiresAt: new Date(
-                Date.now() + (opts.ttlMinutes ?? 20) * 60_000,
-              ),
+              cartId: cartIdObj,
+              userId: userIdObj,
+              expiresAt,
+              purgeAfter,
             },
           ],
           s ? { session: s } : undefined,
@@ -181,14 +207,14 @@ export class InventoryService {
             op: "COMMIT",
             qty,
             referenceType: "order",
-            referenceId: orderId,
+            referenceId: new Types.ObjectId(orderId),
           },
           {
             skuId,
             op: "OUT",
             qty,
             referenceType: "order",
-            referenceId: orderId,
+            referenceId: new Types.ObjectId(orderId),
           },
         ],
         { session },
@@ -212,14 +238,14 @@ export class InventoryService {
             op: "RETURN",
             qty,
             referenceType: "order",
-            referenceId: orderId,
+            referenceId: new Types.ObjectId(orderId),
           },
           {
             skuId,
             op: "IN",
             qty,
             referenceType: "order",
-            referenceId: orderId,
+            referenceId: new Types.ObjectId(orderId),
           },
         ],
         { session },
@@ -294,191 +320,301 @@ export class InventoryService {
    * - ลด reserved เท่าที่กินได้จาก reservation
    * - กัน oversell ด้วยเงื่อนไข atomic
    */
-  async commitReservationByOrder(
-    orderId: string,
+  async commitReservationByMaster(
+    masterOrderId: string,
     opts: { reason?: string; referenceId?: string } = {},
     session?: ClientSession,
   ): Promise<void> {
-    const orderIdObj = new Types.ObjectId(orderId);
+    const _id = new Types.ObjectId(masterOrderId);
 
-    // 1) load order
-    const order = await this.orderModel
-      .findById(orderIdObj)
+    // 1) โหลด MasterOrder (ต้องมี เพื่อหา cartId เป็น fallback)
+    const master = await this.masterOrderModel
+      .findById(_id)
+      .select({ _id: 1, cartId: 1 })
       .lean()
       .session(session ?? null);
 
-    if (!order) throw new NotFoundException("Order not found");
-    if (!order.items?.length) return; // ไม่มีของให้ตัด
+    if (!master) throw new NotFoundException("Master order not found");
 
-    // 2) loop product order
-    for (const it of order.items) {
-      const skuId = new Types.ObjectId(String(it.skuId));
-      const qty = it.quantity ?? 0;
-      if (qty <= 0) continue;
+    // 2) โหลด StoreOrders + Items ของ master นี้ทั้งหมด (โหมด lean ให้วิ่งไว)
+    const storeOrders = await this.storeOrderModel
+      .find({ masterOrderId: _id })
+      .select({ items: 1 })
+      .lean()
+      .session(session ?? null);
 
-      // 2.1) merge reservations of cartId+skuId to consume
-      const reservedCovered =
-        await this.inventoryResolverService.consumeReservationsForSku(
-          order.cartId,
-          skuId,
-          qty,
-          session,
+    if (!storeOrders?.length) return; // ไม่มีของให้ตัด
+
+    // 3) loop ทุกรายการสินค้าในทุก StoreOrder
+    for (const so of storeOrders) {
+      const items: StoreOrderItemLean[] = so.items ?? [];
+
+      for (const it of items) {
+        const skuId = new Types.ObjectId(String(it.skuId));
+        const qty = Number(it.quantity ?? 0);
+        if (qty <= 0) continue;
+
+        // 3.1) พยายาม consume reservation ด้วย masterOrderId ก่อน
+        let reservedCovered = 0;
+
+        if (this.inventoryResolverService?.consumeReservationsForSkuByMaster) {
+          reservedCovered =
+            await this.inventoryResolverService.consumeReservationsForSkuByMaster(
+              _id,
+              skuId,
+              qty,
+              session,
+            );
+        } else {
+          // ถ้าไม่มี method จำเพาะ master ให้ใช้ตัวเดิม (cartId) เป็นหลัก แล้วคุณสามารถเพิ่มเวอร์ชัน by master ภายหลัง
+          // (หรือจะโยน error เพื่อตามแก้ให้ครบก็ได้)
+          reservedCovered = 0;
+        }
+
+        // 3.1.1) ถ้า covered ยังไม่ครบ และ master มี cartId → fallback ไปคิวรีจาก cartId
+        if (reservedCovered < qty && master.cartId) {
+          const more =
+            await this.inventoryResolverService.consumeReservationsForSku(
+              master.cartId,
+              skuId,
+              qty - reservedCovered,
+              session,
+            );
+          reservedCovered += more;
+        }
+
+        // 3.2) หาก TTL ลบ reservation ไปก่อน → reservedCovered อาจ < qty
+        const shortage = Math.max(0, qty - reservedCovered);
+
+        // 3.3) อัปเดต SKU แบบอะตอมมิก:
+        // - ต้องมั่นใจว่า onHand >= qty (ของที่ต้องจ่ายออก)
+        // - ถ้ามี shortage ต้องเช็ค available (หรือ onHand-reserved) >= shortage
+        const cond = buildCommitCondition(skuId, qty, shortage);
+        const update = buildCommitUpdate(qty, reservedCovered);
+
+        const u = await this.skuModel
+          .updateOne(cond, update, { session })
+          .exec();
+        if (u.modifiedCount === 0) {
+          // กันกรณีพิเศษ: สต็อกไม่พอ commit (ถ้า flow reserve ถูกต้องไม่ควรเกิด)
+          throw new BadRequestException("Insufficient stock to commit");
+        }
+
+        // 3.4) บันทึก ledger: COMMIT = ของออกจากคลังจากยอดที่ชำระสำเร็จ
+        await this.ledgerModel.create(
+          [
+            {
+              skuId,
+              productId: new Types.ObjectId(String(it.productId)),
+              storeId: new Types.ObjectId(String(it.storeId)),
+              op: "COMMIT",
+              qty,
+              referenceType: "master_order", // ✅ เปลี่ยน ref ให้สอดคล้อง
+              referenceId: _id,
+              note: opts.reason ?? "payment_succeeded",
+              referenceExt: opts.referenceId, // เก็บ PI/chargeId เพิ่มได้
+              at: new Date(),
+            },
+          ],
+          { session },
         );
-
-      // หาก TTL ลบ reservation ออกไปก่อนชำระสำเร็จ reservedCovered อาจ < qty
-      const shortage = Math.max(0, qty - reservedCovered);
-
-      // 2.2) อัปเดต SKU แบบอะตอมมิก:
-      // - ต้องมี onHand >= qty แน่ ๆ (เราจะ "จ่ายออก" เท่านี้)
-      // - ถ้ามี shortage ต้องเช็ค onHand - reserved >= shortage
-      const cond: SkuCond = buildCommitCondition(skuId, qty, shortage);
-      const update: IncUpdate = buildCommitUpdate(qty, reservedCovered);
-
-      const u = await this.skuModel.updateOne(cond, update, { session }).exec();
-
-      if (u.modifiedCount === 0) {
-        // กันกรณีพิเศษ: สต็อกไม่พอ commit (ผิดปกติ ถ้า flow reserve ถูกต้อง)
-        throw new BadRequestException("Insufficient stock to commit");
       }
-
-      // 2.3) บันทึก ledger: COMMIT = ของออกจากคลังจากยอดที่ชำระสำเร็จ
-      await this.ledgerModel.create(
-        [
-          {
-            skuId,
-            productId: it.productId,
-            storeId: it.storeId,
-            op: "COMMIT",
-            qty,
-            referenceType: "order",
-            referenceId: order._id,
-            note: opts.reason ?? "payment_succeeded",
-          },
-        ],
-        { session },
-      );
     }
   }
 
   /**
-   * ปล่อย stock ที่ "จองไว้" ทั้งหมดของออเดอร์ (เช่น เมื่อ payment failed/canceled)
-   * - ลด reserved ของ SKU ตามจำนวนที่จองไว้
-   * - เขียน ledger: RELEASE
-   * - ลบ Reservation ที่เกี่ยวข้อง
-   * - ทำงานใน transaction; idempotent (ถ้าถูกปล่อยไปแล้วจะไม่มี reservation เหลือ → จบเงียบ ๆ)
+   * ปล่อย (release) reservation ทั้งหมดที่ผูกกับ masterOrderId
+   * - ถ้ามี reservation ที่ยัง ACTIVE → ลด reserved และเพิ่ม available กลับ
+   * - mark reservation = RELEASED (idempotent: เรียกซ้ำไม่พัง)
+   * - รองรับกรณี reserve เก่าที่ไม่มี masterOrderId → fallback จาก cartId ใน Master
    */
-  async releaseReservationByOrder(
-    orderId: string,
-    meta: ReleaseMeta = {},
+  async releaseByMaster(
+    masterOrderId: string,
     session?: ClientSession,
   ): Promise<void> {
-    const useOwnSession = !session;
-    const s = session ?? (await this.connection.startSession());
+    const _id = new Types.ObjectId(masterOrderId);
+
+    // 1) หาว่ามี reservation ผูกกับ master โดยตรงไหม
+    const directQuery: FilterQuery<Reservation> = {
+      masterOrderId: _id,
+      status: "ACTIVE",
+    };
+
+    // 2) ถ้าไม่มี ให้ fallback ไป cartId ของ master
+    let hasAny = await this.reservationModel
+      .exists(directQuery)
+      .session(session ?? null);
+    let query: FilterQuery<Reservation> = directQuery;
+
+    if (!hasAny) {
+      const master = await this.masterOrderModel
+        .findById(_id)
+        .select({ cartId: 1 })
+        .lean()
+        .session(session ?? null);
+      if (master?.cartId) {
+        query = { cartId: master.cartId, status: "ACTIVE" };
+        hasAny = await this.reservationModel
+          .exists(query)
+          .session(session ?? null);
+      }
+    }
+
+    if (!hasAny) return; // ไม่มีอะไรต้องปล่อย → จบแบบ idempotent
+
+    // 3) ดึงรายการที่จะปล่อย (เฉพาะ ACTIVE)
+    const reservations = await this.reservationModel
+      .find(query)
+      .select({ _id: 1, skuId: 1, storeId: 1, qty: 1 })
+      .lean<ReservationLean[]>()
+      .session(session ?? null);
+
+    if (reservations.length === 0) return;
+
+    // 4) รวม qty ต่อ skuId (ไม่ใช้ storeId เพราะ skus ไม่มีฟิลด์นี้)
+    const aggregateMap = new Map<
+      string,
+      { skuId: Types.ObjectId; qty: number }
+    >();
+    for (const r of reservations) {
+      const key = String(r.skuId);
+      if (!aggregateMap.has(key)) {
+        aggregateMap.set(key, { skuId: r.skuId, qty: 0 });
+      }
+      aggregateMap.get(key)!.qty += r.qty;
+    }
+
+    // 5) ทำงานใน transaction (หรือใช้ session ที่ถูกส่งมา)
+    const localSession = session ?? (await this.conn.startSession());
+    const shouldEnd = !session;
 
     try {
-      await s.withTransaction(async () => {
-        const order = await this.orderModel
-          .findById(new Types.ObjectId(orderId))
-          .select("_id cartId")
-          .session(s)
-          .lean<{ _id: Types.ObjectId; cartId: Types.ObjectId }>()
-          .exec();
+      if (!session) localSession.startTransaction();
 
-        if (!order) throw new NotFoundException("Order not found");
-
-        // ถ้า Reservation ของคุณ “ผูกกับ orderId” อยู่แล้ว ให้เปลี่ยน filter เป็น { orderId: order._id }
-        // ที่โค้ดนี้จะใช้ cartId ที่สร้าง order มาผูกการจองไว้
-        const reservations = await this.reservationModel
-          .find({ cartId: String(order.cartId) })
-          .session(s)
-          .lean<ReservationLean[]>()
-          .exec();
-
-        if (!reservations.length) {
-          // idempotent: ไม่มีอะไรให้ปล่อยแล้ว
-          return;
-        }
-
-        // รวมจำนวนที่จองไว้ต่อ SKU
-        const bySku = new Map<string, AggRow>();
-        for (const r of reservations) {
-          const skuIdStr = String(r.skuId);
-          const qty = r.qty ?? 0;
-
-          const prodId =
-            r.productId instanceof Types.ObjectId
-              ? r.productId
-              : new Types.ObjectId(String(r.productId));
-          const storeId =
-            r.storeId instanceof Types.ObjectId
-              ? r.storeId
-              : new Types.ObjectId(String(r.storeId));
-
-          const ex = bySku.get(skuIdStr);
-          if (ex) {
-            ex.qty += qty;
-
-            // (ปกติ SKU เดียวต้องสังกัด product/store เดียวกันอยู่แล้ว)
-            // ถ้าพบไม่ตรงกัน ให้ log ไว้เผื่อข้อมูลไม่สะอาด
-            if (!ex.productId.equals(prodId) || !ex.storeId.equals(storeId)) {
-              console.log(`Reservation data mismatch for sku=${skuIdStr}`);
-            }
-          } else {
-            bySku.set(skuIdStr, { qty, productId: prodId, storeId });
-          }
-        }
-
-        // ลด reserved แบบอะตอมมิก (กันติดลบ) ด้วย bulkWrite
-        const decOps = Array.from(bySku.entries()).map(([skuIdStr, agg]) => ({
-          updateOne: {
-            filter: {
-              _id: new Types.ObjectId(skuIdStr),
-              reserved: { $gte: agg.qty },
-            },
-            update: { $inc: { reserved: -agg.qty } },
+      // 5.1 อัปเดต stock: reserved -= qty, available += qty
+      const now = new Date();
+      const stockOps = Array.from(aggregateMap.values()).map((g) => ({
+        updateOne: {
+          filter: { _id: g.skuId },
+          update: {
+            $inc: { reserved: -g.qty, available: +g.qty },
+            $set: { updatedAt: new Date() },
           },
-        }));
+          upsert: false, // เผื่อกรณี stock ยังไม่มีเอกสาร (rare)
+        },
+      }));
+      if (stockOps.length) {
+        await this.skuModel.bulkWrite(stockOps, { session: localSession });
+      }
 
-        if (decOps.length) {
-          const bulkRes = await this.skuModel.bulkWrite(decOps, { session: s });
-          // ถ้าบางตัวลดไม่ได้ (reserved < qty) ให้ throw เพื่อให้ผู้ดูแลตรวจสอบความไม่สอดคล้อง
-          if (bulkRes.matchedCount !== decOps.length) {
-            throw new BadRequestException(
-              "Inconsistent reserved quantity when releasing stock",
-            );
-          }
-        }
+      // 5.2 mark reservation = RELEASED (เฉพาะ ACTIVE) + ตั้ง purgeAfter
+      await this.reservationModel.updateMany(
+        { _id: { $in: reservations.map((r) => r._id) }, status: "ACTIVE" },
+        {
+          $set: {
+            status: "RELEASED",
+            releasedAt: now,
+            releasedReason: "payment_timeout",
+            purgeAfter: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+            updatedAt: now,
+          },
+        },
+        { session: localSession },
+      );
 
-        const refIdObj = Types.ObjectId.isValid(orderId)
-          ? new Types.ObjectId(orderId)
-          : undefined; // ถ้า schema อนุญาต string ก็ส่ง string เดิม
+      // 5.3 insert ledger status RELEASED
+      const baseIdem = `release:${masterOrderId}:${now.getTime()}`;
+      const docs = reservations.map((g) => ({
+        skuId: g.skuId,
+        productId: g.productId, // ถ้ามี
+        storeId: g.storeId, // ถ้ามี stock per store
+        masterOrderId: new Types.ObjectId(masterOrderId),
+        op: "RELEASE" as const,
+        qty: g.qty,
+        referenceType: "master_order" as const,
+        referenceId: new Types.ObjectId(masterOrderId),
+        reason: "payment_timeout",
+        idemKey: `${baseIdem}:${String(g.skuId)}`, // ↔ unique + sparse
+        note: "auto release by expiry reaper",
+      }));
 
-        // เขียน ledger แบบรวมต่อ SKU
-        const ledgerRows = Array.from(bySku.entries()).map(
-          ([skuIdStr, agg]) => ({
-            skuId: new Types.ObjectId(skuIdStr),
-            productId: agg.productId,
-            storeId: agg.storeId,
-            op: "RELEASE" as const,
-            qty: agg.qty,
-            referenceType: "order",
-            referenceId: refIdObj ?? orderId,
-            note: meta.reason,
-          }),
-        );
-        if (ledgerRows.length) {
-          await this.ledgerModel.insertMany(ledgerRows, { session: s });
-        }
+      await this.ledgerModel.insertMany(docs, { session });
 
-        // ลบ reservations ชุดนี้
-        const resIds = reservations.map((r) => r._id);
-        await this.reservationModel
-          .deleteMany({ _id: { $in: resIds } })
-          .session(s)
-          .exec();
-      });
+      if (!session) await localSession.commitTransaction();
+    } catch (e) {
+      if (!session) await localSession.abortTransaction();
+      throw e;
     } finally {
-      if (useOwnSession) await s.endSession();
+      if (shouldEnd) await localSession.endSession();
+    }
+  }
+
+  /**
+   * (ทางเลือก) ปล่อยจาก cart โดยตรง
+   */
+  async releaseByCart(cartId: string, session?: ClientSession): Promise<void> {
+    const query: FilterQuery<Reservation> = {
+      cartId: new Types.ObjectId(cartId),
+      status: "ACTIVE",
+    };
+    const exists = await this.reservationModel
+      .exists(query)
+      .session(session ?? null);
+    if (!exists) return;
+
+    const reservations = await this.reservationModel
+      .find(query)
+      .select({ _id: 1, skuId: 1, storeId: 1, qty: 1 })
+      .lean()
+      .session(session ?? null);
+
+    if (reservations.length === 0) return;
+
+    // รวม qty และอัปเดตเหมือนด้านบน
+    const aggregateMap = new Map<
+      string,
+      { skuId: Types.ObjectId; storeId: Types.ObjectId; qty: number }
+    >();
+    for (const r of reservations) {
+      const k = `${String(r.skuId)}::${String(r.storeId)}`;
+      aggregateMap.set(k, {
+        skuId: r.skuId,
+        storeId: r.storeId,
+        qty: (aggregateMap.get(k)?.qty ?? 0) + r.qty,
+      });
+    }
+
+    const localSession = session ?? (await this.conn.startSession());
+    const shouldEnd = !session;
+
+    try {
+      if (!session) localSession.startTransaction();
+
+      const stockOps = Array.from(aggregateMap.values()).map((g) => ({
+        updateOne: {
+          filter: { skuId: g.skuId, storeId: g.storeId },
+          update: {
+            $inc: { reserved: -g.qty, available: +g.qty },
+            $set: { updatedAt: new Date() },
+          },
+          upsert: true,
+        },
+      }));
+      if (stockOps.length)
+        await this.skuModel.bulkWrite(stockOps, { session: localSession });
+
+      await this.reservationModel.updateMany(
+        { _id: { $in: reservations.map((r) => r._id) }, status: "ACTIVE" },
+        { $set: { status: "RELEASED", updatedAt: new Date() } },
+        { session: localSession },
+      );
+
+      if (!session) await localSession.commitTransaction();
+    } catch (e) {
+      if (!session) await localSession.abortTransaction();
+      throw e;
+    } finally {
+      if (shouldEnd) await localSession.endSession();
     }
   }
 }

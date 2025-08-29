@@ -17,6 +17,7 @@ export class SkusService {
 
   async prepareForInsert(
     productId: Types.ObjectId,
+    storeId: Types.ObjectId,
     productName: string,
     defaultPrice: number | undefined,
     dtos: CreateSkuDto[],
@@ -35,6 +36,7 @@ export class SkusService {
 
       return {
         productId,
+        storeId,
         attributes: d.attributes,
         normalizedAttributes: normalized,
         skuCode: d.skuCode?.trim() || buildSkuCode(productName, d.attributes),

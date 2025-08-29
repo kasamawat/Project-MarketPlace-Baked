@@ -16,7 +16,7 @@ export class WebhookEvent {
   type!: string; // event.type
 
   @Prop()
-  orderId?: string; // ดึงจาก metadata ถ้ามี
+  masterOrderId?: string; // ดึงจาก metadata ถ้ามี
 
   @Prop({ type: Date, default: () => new Date() })
   handledAt!: Date; // เวลา mark handled

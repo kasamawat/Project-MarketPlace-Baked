@@ -31,6 +31,14 @@ import { SkuLeanRaw, SkuResponseDto } from "./dto/response-skus.dto";
 import { SkuBatchSyncDto } from "./dto/sku-batch.dto";
 import { normalizeAttributes } from "src/shared/utils/sku.util";
 import { plainToInstance } from "class-transformer";
+import {
+  DeleteProductOptions,
+  DeleteProductResult,
+} from "./types/product.types";
+import {
+  StoreOrder,
+  StoreOrderDocument,
+} from "src/orders/schemas/store-order.schema";
 
 @Injectable()
 export class ProductsService {
@@ -38,6 +46,8 @@ export class ProductsService {
     @InjectModel(Product.name) private productModel: Model<ProductDocument>,
     private readonly skus: SkusService,
     @InjectModel(Sku.name) private readonly skuModel: Model<SkuDocument>, // ✅ type-safe
+    @InjectModel(StoreOrder.name)
+    private readonly storeOrderModel: Model<StoreOrderDocument>,
     @InjectConnection() private readonly connection: Connection,
   ) {}
 
@@ -71,6 +81,7 @@ export class ProductsService {
 
       const rows = await this.skus.prepareForInsert(
         product._id as Types.ObjectId,
+        new Types.ObjectId(storeId),
         product.name,
         product.defaultPrice,
         dto.skus,
@@ -120,6 +131,7 @@ export class ProductsService {
     // เตรียม normalizedAttributes + skuCode
     const createRows = create.map((d) => ({
       productId: new Types.ObjectId(productId),
+      storeId: new Types.ObjectId(payload.storeId),
       attributes: d.attributes,
       normalizedAttributes: normalizeAttributes(d.attributes),
       skuCode: d.skuCode?.trim(),
@@ -233,6 +245,128 @@ export class ProductsService {
     return plainToInstance(SkuResponseDto, after, {
       excludeExtraneousValues: true,
     });
+  }
+
+  async deleteProduct(
+    productId: string,
+    payload: JwtPayload,
+    opts: DeleteProductOptions = {},
+  ): Promise<DeleteProductResult> {
+    const { force = false, soft = false } = opts;
+
+    const productIdObj = new Types.ObjectId(productId);
+    const storeIdObj = new Types.ObjectId(payload.storeId);
+
+    // ใช้ session/transaction เพื่อความอะตอมมิก
+    const session = await this.connection.startSession();
+    try {
+      return await session.withTransaction(async () => {
+        // 1) โหลดสินค้าแบบผูก storeId เพื่อกัน TOCTOU
+        const prod = await this.productModel
+          .findOne({ _id: productIdObj, storeId: storeIdObj })
+          .session(session)
+          .lean();
+
+        if (!prod) throw new NotFoundException("Product not found");
+        // เผื่อ payload/store ผิดพลาดซ้ำซ้อน
+        if (String(prod.storeId) !== String(payload.storeId)) {
+          throw new ForbiddenException("You cannot delete this product");
+        }
+
+        // 2) ตรวจการอ้างอิงใน storeorders ที่มี items เป็น array
+        const hasRefs = await this.storeOrderModel
+          .exists({
+            storeId: storeIdObj,
+            "items.productId": productIdObj,
+            status: { $nin: ["CANCELED", "EXPIRED"] },
+          })
+          .session(session);
+
+        if (!force && !soft && hasRefs) {
+          throw new ConflictException(
+            `This product is referenced in existing store orders. Use soft delete or set { force: true }.`,
+          );
+        }
+
+        if (soft) {
+          // 3A) SOFT DELETE: ตีธง isDeleted + เก็บ metadata
+          const now = new Date();
+          const [pRes, sRes] = await Promise.all([
+            this.productModel
+              .updateOne(
+                { _id: productIdObj, storeId: storeIdObj },
+                {
+                  $set: {
+                    isDeleted: true,
+                    deletedAt: now,
+                    deletedBy: payload.userId,
+                    status: "DELETED",
+                  },
+                },
+              )
+              .session(session),
+            this.skuModel
+              .updateMany(
+                { productId: productIdObj, storeId: storeIdObj },
+                {
+                  $set: {
+                    isDeleted: true,
+                    deletedAt: now,
+                    deletedBy: payload.userId,
+                  },
+                },
+              )
+              .session(session),
+          ]);
+
+          // (ออปชั่น) ยิงอีเวนต์สำหรับระบบอื่น ๆ
+          // this.eventBus?.publish?.({
+          //   type: "product.soft_deleted",
+          //   productId,
+          //   storeId: String(storeIdObj),
+          //   by: payload.userId,
+          //   at: now.toISOString(),
+          // });
+
+          return {
+            mode: "soft",
+            productId,
+            deletedSkus: 0,
+            deletedProducts: 0,
+            softUpdatedProducts: pRes.modifiedCount ?? 0,
+            softUpdatedSkus: sRes.modifiedCount ?? 0,
+          };
+        } else {
+          // 3B) HARD DELETE: ลบทั้ง product และ skus
+          // (กรณีมี refs และ force=true จะยอมลบ)
+          const [pRes, sRes] = await Promise.all([
+            this.productModel
+              .deleteOne({ _id: productIdObj, storeId: storeIdObj })
+              .session(session),
+            this.skuModel
+              .deleteMany({ productId: productIdObj, storeId: storeIdObj })
+              .session(session),
+          ]);
+
+          // (ออปชั่น) ยิงอีเวนต์
+          // this.eventBus?.publish?.({
+          //   type: "product.deleted",
+          //   productId,
+          //   storeId: String(storeIdObj),
+          //   by: payload.userId,
+          // });
+
+          return {
+            mode: "hard",
+            productId,
+            deletedProducts: pRes.deletedCount ?? 0,
+            deletedSkus: sRes.deletedCount ?? 0,
+          };
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
   }
 
   async listForStore(

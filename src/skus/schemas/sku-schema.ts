@@ -13,6 +13,14 @@ export class Sku {
   })
   productId!: Types.ObjectId;
 
+  @Prop({
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Store",
+    required: true,
+    index: true,
+  })
+  storeId!: Types.ObjectId;
+
   @Prop({ type: Object, required: true })
   attributes!: Record<string, string>;
 

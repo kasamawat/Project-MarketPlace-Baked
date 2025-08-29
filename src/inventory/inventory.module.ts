@@ -8,17 +8,25 @@ import {
 } from "./schemas/inventory-ledger.schema";
 import { Reservation, ReservationSchema } from "./schemas/reservation.schema";
 import { SkusModule } from "src/skus/skus.module";
-import { Order, OrderSchema } from "src/orders/schemas/order.schema";
 import { Sku, SkuSchema } from "src/skus/schemas/sku-schema";
 import { InventoryCommonModule } from "./common/inventory-common.module";
+import {
+  MasterOrder,
+  MasterOrderSchema,
+} from "src/orders/schemas/master-order.schema";
+import {
+  StoreOrder,
+  StoreOrderSchema,
+} from "src/orders/schemas/store-order.schema";
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: InventoryLedger.name, schema: InventoryLedgerSchema },
       { name: Reservation.name, schema: ReservationSchema },
-      { name: Order.name, schema: OrderSchema },
       { name: Sku.name, schema: SkuSchema },
+      { name: MasterOrder.name, schema: MasterOrderSchema },
+      { name: StoreOrder.name, schema: StoreOrderSchema },
     ]),
     // ✅ ดึง SkuModel มาจาก SkusModule
     SkusModule,

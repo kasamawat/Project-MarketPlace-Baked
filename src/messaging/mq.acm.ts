@@ -35,7 +35,7 @@ export class AcmMqPublisher {
         ...options,
         headers: {
           eventId: String(payload?.eventId),
-          oredrId: String(payload?.orderId),
+          masterOrderId: String(payload?.masterOrderId),
           ...options.headers,
         } as Record<string, any>,
       },

@@ -12,13 +12,13 @@ export interface MqPublisher {
 }
 
 export type PaymentsProcessingPayload = {
-  orderId: string;
+  masterOrderId: string;
   paymentIntentId: string;
   at?: string;
 };
 
 export type PaymentsSucceededPayload = {
-  orderId: string;
+  masterOrderId: string;
   paymentIntentId: string;
   chargeId?: string;
   paidAmount?: number; // อาจไม่มี ถ้าไม่ใส่ตอน publish
@@ -26,8 +26,14 @@ export type PaymentsSucceededPayload = {
   at?: string;
 };
 
+export type PaymentsCanceledPayload = {
+  masterOrderId: string;
+  paymentIntentId: string;
+  reason?: string;
+};
+
 export type PaymentsFailedPayload = {
-  orderId: string;
+  masterOrderId: string;
   paymentIntentId: string;
   error?: string;
   at?: string;

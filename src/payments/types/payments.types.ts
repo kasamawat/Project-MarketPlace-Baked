@@ -1,7 +1,9 @@
 export type PaymentEventRow = { id: string; type: string; createdAt: Date };
 
 export type PendingEvent = {
-  routingKey: "payments.processing" | "payments.succeeded" | "payments.failed";
+  exchange: string;
+  routingKey: string;
   payload: Record<string, any>;
-  messageId: string;
+  // messageId: string;
+  options: { messageId?: string; persistent?: boolean };
 };
