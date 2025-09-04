@@ -1,7 +1,13 @@
 // src/orders/schemas/master-order.schema.ts
 import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
 import { Document, Types } from "mongoose";
-import { Pricing, TimelineItem, MasterStatus } from "./shared.subdocs";
+import {
+  Pricing,
+  TimelineItem,
+  MasterStatus,
+  AddressInfoSchema,
+  AddressInfo,
+} from "./shared.subdocs";
 
 export type MasterOrderDocument = MasterOrder & Document;
 
@@ -44,6 +50,10 @@ export class MasterOrder {
   @Prop() paidAmount?: number;
   @Prop() paidCurrency?: string;
   @Prop() failureReason?: string;
+
+  // address
+  @Prop({ type: AddressInfoSchema }) shippingAddress?: AddressInfo;
+  @Prop({ type: AddressInfoSchema }) billingAddress?: AddressInfo;
 
   // รวมทั้งเช็คเอาต์
   @Prop({ type: Pricing, default: {} }) pricing!: Pricing;

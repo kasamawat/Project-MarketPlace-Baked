@@ -1,12 +1,5 @@
 import { Types } from "mongoose";
-
-type StoreOrderStatus =
-  | "pending_payment"
-  | "paying"
-  | "processing"
-  | "paid"
-  | "expired"
-  | "canceled";
+import { MasterStatus, StoreStatus } from "../schemas/shared.subdocs";
 
 type StoreItemPreview = {
   name: string;
@@ -34,7 +27,8 @@ type StoreAggRow = {
   masterOrderId: Types.ObjectId;
   createdAt: Date;
   currency: string;
-  status: StoreOrderStatus;
+  buyerStatus: MasterStatus;
+  storeStatus: StoreStatus;
   itemsPreview: StoreItemPreview[];
   itemsCount: number;
   itemsTotal: number;
@@ -55,7 +49,7 @@ export type StoreOrderFacet = {
   total: { count: number }[];
 };
 
-export type StoreOrderDetailItem = {
+export type StoreOrderItems = {
   masterOrderId: string;
   storeOrderId: string;
   createdAt: string;
@@ -63,7 +57,8 @@ export type StoreOrderDetailItem = {
   itemsCount: number;
   itemsTotal: number;
   currency: string;
-  status: StoreOrderStatus;
+  buyerStatus: MasterStatus;
+  storeStatus: StoreStatus;
   fulfillment: Fulfillment;
   buyer: { name: string; email: string };
 };

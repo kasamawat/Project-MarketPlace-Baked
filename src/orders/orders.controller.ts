@@ -71,7 +71,7 @@ export class OrdersController {
 
   @Get()
   @UseGuards(AuthGuard("jwt"))
-  async listMyOrders(
+  async listForBuyer(
     @Query() q: ListOrdersDto,
     @CurrentUser() user: JwtPayload,
   ) {

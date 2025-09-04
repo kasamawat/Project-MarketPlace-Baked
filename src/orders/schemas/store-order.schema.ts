@@ -8,13 +8,16 @@ import {
   StoreStatus,
   FulfillStatus,
   FulfillmentInfo,
+  AddressInfoSchema,
+  AddressInfo,
+  MasterStatus,
 } from "./shared.subdocs";
 
 export type StoreOrderDocument = StoreOrder & Document;
 
 @Schema({ _id: false })
 class FulfillTimelineItem {
-  @Prop({ required: true }) type!: FulfillStatus;
+  @Prop({ required: true }) type!: string;
   // | "fulfillment.packed"
   // | "fulfillment.shipped"
   // | "fulfillment.delivered";
@@ -37,16 +40,24 @@ export class StoreOrderItem {
   @Prop({ required: true }) quantity!: number;
   @Prop({ required: true }) subtotal!: number;
 
+  // ✅ ตัวนับ (ช่วยคิวรี/อัปเดตเร็ว)
+  @Prop({ default: 0 }) packedQty!: number;
+  @Prop({ default: 0 }) shippedQty!: number;
+  @Prop({ default: 0 }) deliveredQty!: number;
+  @Prop({ default: 0 }) canceledQty!: number;
+
   @Prop({
     type: String,
     enum: [
       "AWAITING_PAYMENT",
       "PENDING",
+      "PARTIALLY_PACKED",
       "PACKED",
+      "PARTIALLY_SHIPPED",
       "SHIPPED",
+      "PARTIALLY_DELIVERED",
       "DELIVERED",
       "CANCELED",
-      "RETURNED",
     ],
     default: "AWAITING_PAYMENT",
   })
@@ -68,9 +79,16 @@ export class StoreOrder {
   @Prop({
     type: String,
     required: true,
-    enum: ["pending_payment", "paid", "canceled", "expired"],
+    enum: ["pending_payment", "paid", "canceled", "expired", "refunded"],
   })
-  status!: StoreStatus; // mirror จาก master (จ่าย=paid), แต่ยกเลิก/หมดอายุอาจแยกตามร้านในบางเคส
+  buyerStatus!: MasterStatus; // mirror จาก master (จ่าย=paid), แต่ยกเลิก/หมดอายุอาจแยกตามร้านในบางเคส
+
+  @Prop({
+    type: String,
+    required: true,
+    enum: ["PENDING", "PACKED", "SHIPPED", "DELIVERED", "CANCELD", "RETURNED"],
+  })
+  status!: StoreStatus; // Status ของ store
 
   @Prop({ required: true, default: "THB" }) currency!: string;
 
@@ -85,6 +103,8 @@ export class StoreOrder {
 
   // Fulfillment Summary Items Fulfill
   @Prop({ type: FulfillmentInfo, default: {} }) fulfillment?: FulfillmentInfo;
+
+  @Prop({ type: AddressInfoSchema }) shippingAddress?: AddressInfo; // snapshot เฉพาะร้าน
 
   // อาจเติม tracking-level fields เพื่อ list viewเร็ว
   @Prop() latestTrackingNo?: string;

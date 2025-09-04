@@ -6,7 +6,6 @@ import {
   Res,
   Get,
   UseGuards,
-  Put,
   Req,
 } from "@nestjs/common";
 import { AuthService } from "./auth.service";
@@ -14,7 +13,6 @@ import { Response, Request } from "express";
 import { AuthGuard } from "@nestjs/passport";
 import { JwtPayload } from "./types/jwt-payload.interface";
 import { CurrentUser } from "src/common/current-user.decorator";
-import { User } from "src/user/schemas/user.schema";
 import { CartResolverService } from "src/cart/common/cart-resolver.service";
 import { LoginDto } from "./dto/auth.dto";
 import { setAuthCookie } from "./utils/auth-helper";
@@ -84,9 +82,9 @@ export class AuthController {
     return this.authService.getProfile(req);
   }
 
-  @Put("update")
-  @UseGuards(AuthGuard("jwt"))
-  update(@CurrentUser() req: JwtPayload, @Body() body: Partial<User>) {
-    return this.authService.update(req, body);
-  }
+  // @Put("update")
+  // @UseGuards(AuthGuard("jwt"))
+  // update(@CurrentUser() req: JwtPayload, @Body() body: Partial<User>) {
+  //   return this.authService.update(req, body);
+  // }
 }

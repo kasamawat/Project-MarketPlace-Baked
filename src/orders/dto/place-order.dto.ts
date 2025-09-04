@@ -8,6 +8,7 @@ import {
   MaxLength,
 } from "class-validator";
 import { PaymentMethodKind } from "src/payments/payment.types";
+import { AddressInfo } from "../types/store-order-detail.types";
 
 export class PlaceOrderDto {
   @ApiPropertyOptional()
@@ -24,7 +25,7 @@ export class PlaceOrderDto {
   @ApiPropertyOptional({ type: Object })
   @IsOptional()
   @IsObject()
-  shippingAddress?: Record<string, string>; // เก็บ raw ง่าย ๆ ก่อน (firstName, phone, line1, ...)
+  shippingAddress?: AddressInfo; // เก็บ raw ง่าย ๆ ก่อน (firstName, phone, line1, ...)
 
   // (ไม่รับรายการสินค้า—ดึงจาก cart ฝั่ง BE เพื่อความปลอดภัย)
 }

@@ -1,4 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
+import { MasterStatus, StoreStatus } from "../schemas/shared.subdocs";
 
 export class StoreListItemDto {
   @ApiProperty() masterOrderId!: string;
@@ -19,13 +20,11 @@ export class StoreListItemDto {
       "canceled",
     ],
   })
-  status!:
-    | "pending_payment"
-    | "paying"
-    | "processing"
-    | "paid"
-    | "expired"
-    | "canceled";
+  buyerStatus!: MasterStatus;
+  @ApiProperty({
+    enum: ["PENDING", "PACKED", "SHIPPED", "DELIVERED", "CANCELD"],
+  })
+  storeStatus!: StoreStatus;
   @ApiProperty({ type: Object }) fulfillment: {
     status:
       | "UNFULFILLED"

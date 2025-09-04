@@ -1,12 +1,4 @@
-import {
-  Body,
-  Controller,
-  HttpCode,
-  Post,
-  Req,
-  Headers,
-  UseGuards,
-} from "@nestjs/common";
+import { Body, Controller, Post, UseGuards } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { PaymentsService } from "./payments.service";
 import { CreateIntentArgs, CreateIntentResult } from "./payment.types";
@@ -48,33 +40,4 @@ export class PaymentsController {
   ) {
     return this.svc.ensureIntent(dto);
   }
-
-  @Post("webhook")
-  @HttpCode(200)
-  async handleWebhook(
-    @Req() req: Request, // req.body จะเป็น Buffer (เพราะใช้ bodyParser.raw ที่ main.ts)
-    @Headers("stripe-signature") signature: string,
-  ) {
-    // 🔎 debug ชั่วคราว
-    console.log(
-      `[Webhook] hit len=${(req.body as Buffer)?.length ?? 0}, hasSig=${!!signature}, whsec=${(process.env.STRIPE_WEBHOOK_SECRET || "").slice(0, 7)}...`,
-    );
-
-    const event = this.svc.verifyAndParseWebhook(
-      req.body as Buffer, // ✅ Buffer ดิบ
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET!, // whsec_xxx
-    );
-
-    console.log(`Stripe HOOK Type: ${event.type}`);
-
-    await this.svc.handleEvent(event);
-    return { received: true };
-  }
-
-  // @Post("test")
-  // @HttpCode(200)
-  // async testEvent() {
-  //   return this.svc.testEvent();
-  // }
 }

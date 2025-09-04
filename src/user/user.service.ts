@@ -1,16 +1,209 @@
-import { Injectable } from "@nestjs/common";
-// import { InjectModel } from "@nestjs/mongoose";
-// import { Model } from "mongoose";
-// import { User, UserDocument } from "./schemas/user.schema";
+import { Injectable, NotFoundException } from "@nestjs/common";
+import { User, UserDocument } from "./schemas/user.schema";
+import { Model, Types } from "mongoose";
+import { InjectModel } from "@nestjs/mongoose";
+import { JwtPayload } from "src/auth/types/jwt-payload.interface";
+import { AddressInfoResponseDto } from "./dto/user-address.dto";
+import { AddressInfoDto } from "./dto/address-info.dto";
 
 @Injectable()
 export class UserService {
-  // constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
-  // async create(email: string, password: string): Promise<User> {
-  //   const createdUser = new this.userModel({ email, password });
-  //   return createdUser.save();
-  // }
-  // async findByEmail(email: string): Promise<User | null> {
-  //   return this.userModel.findOne({ email }).exec();
-  // }
+  constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
+
+  async updateUserInfo(
+    payload: JwtPayload,
+    updateData: Partial<User>,
+  ): Promise<{ message: string }> {
+    const result = await this.userModel.findByIdAndUpdate(
+      payload.userId,
+      {
+        $set: {
+          firstname: updateData.firstname,
+          lastname: updateData.lastname,
+          gender: updateData.gender,
+          dob: updateData.dob,
+          editedAt: new Date(),
+        },
+      },
+      { new: true }, // ✅ return document หลังอัปเดต
+    );
+
+    if (!result) {
+      throw new NotFoundException("User not found");
+    }
+
+    return { message: "Profile updated successfully" };
+  }
+
+  async getAddresses(payload: JwtPayload): Promise<AddressInfoResponseDto[]> {
+    // ดึงเฉพาะฟิลด์ addresses และตัด _id ของ user ออก
+    const doc = await this.userModel
+      .findById(payload.userId)
+      .select({ addresses: 1, _id: 0 })
+      .lean()
+      .exec();
+
+    if (!doc) throw new NotFoundException("User not found");
+
+    const addrs = (doc.addresses ?? []) as Array<{
+      _id: Types.ObjectId;
+      name?: string;
+      phone?: string;
+      line1?: string;
+      line2?: string;
+      district?: string;
+      subDistrict?: string;
+      province?: string;
+      postalCode?: string;
+      country?: string;
+      note?: string;
+      isDefault?: boolean;
+    }>;
+
+    // map -> DTO (+ แปลง _id เป็น string)
+    const result: AddressInfoResponseDto[] = addrs.map((a) => ({
+      _id: String(a._id),
+      name: a.name,
+      phone: a.phone,
+      line1: a.line1,
+      line2: a.line2,
+      district: a.district,
+      subDistrict: a.subDistrict,
+      province: a.province,
+      postalCode: a.postalCode,
+      country: a.country,
+      note: a.note,
+      isDefault: a.isDefault ?? false,
+    }));
+
+    // (ออปชั่น) จัดเรียงให้ default ขึ้นก่อน
+    result.sort((x, y) => Number(y.isDefault ?? 0) - Number(x.isDefault ?? 0));
+
+    return result;
+  }
+
+  async addAddress(
+    payload: JwtPayload,
+    dto: AddressInfoDto,
+  ): Promise<AddressInfoResponseDto> {
+    const user = await this.userModel.findById(payload.userId).exec();
+    if (!user) throw new NotFoundException("User not found");
+
+    // ถ้ามี isDefault=true → clear default address อื่น ๆ ก่อน
+    if (dto.isDefault) {
+      user.addresses.forEach((a) => {
+        a.isDefault = false;
+      });
+    }
+
+    user.addresses.push(dto);
+    await user.save();
+
+    const newAddress = user.addresses[user.addresses.length - 1];
+
+    return newAddress;
+  }
+
+  async updateAddress(
+    payload: JwtPayload,
+    addressId: string,
+    dto: AddressInfoDto,
+  ): Promise<AddressInfoResponseDto> {
+    const userId = new Types.ObjectId(payload.userId);
+    const addrId = new Types.ObjectId(addressId);
+
+    // สร้าง $set เฉพาะฟิลด์ที่มีมา
+    const prefix = "addresses.$";
+    const set: Record<string, any> = {};
+    const fields: (keyof AddressInfoDto)[] = [
+      "name",
+      "phone",
+      "line1",
+      "line2",
+      "district",
+      "subDistrict",
+      "province",
+      "postalCode",
+      "country",
+      "note",
+    ];
+    for (const k of fields) {
+      if (dto[k] !== undefined) set[`${prefix}.${k}`] = dto[k];
+    }
+    if (dto.isDefault !== undefined) set[`${prefix}.isDefault`] = dto.isDefault;
+
+    // ถ้า isDefault=true → เคลียร์ตัวอื่นก่อน (อะตอมมิกพอสำหรับ use-case นี้)
+    if (dto.isDefault === true) {
+      await this.userModel
+        .updateOne(
+          { _id: userId },
+          { $set: { "addresses.$[].isDefault": false } },
+        )
+        .exec();
+    }
+
+    const { matchedCount } = await this.userModel
+      .updateOne({ _id: userId, "addresses._id": addrId }, { $set: set })
+      .exec();
+
+    if (!matchedCount) throw new NotFoundException("Address not found");
+
+    // ดึง address ที่อัปเดตมาให้ FE
+    const doc = await this.userModel
+      .findOne(
+        { _id: userId },
+        { addresses: { $elemMatch: { _id: addrId } }, _id: 0 },
+      )
+      .lean();
+
+    if (!doc?.addresses?.[0]) throw new NotFoundException("Address not found");
+    return doc.addresses[0];
+  }
+
+  async setDefaultAddress(
+    payload: JwtPayload,
+    addressId: string,
+  ): Promise<{ id: string }> {
+    const userId = new Types.ObjectId(payload.userId);
+    const addrId = new Types.ObjectId(addressId);
+
+    // เคลียร์ทั้งหมดให้ false
+    await this.userModel
+      .updateOne(
+        { _id: userId },
+        { $set: { "addresses.$[].isDefault": false } },
+      )
+      .exec();
+
+    // ตั้งตัวที่เลือกให้ true (positional operator)
+    const res = await this.userModel
+      .updateOne(
+        { _id: userId, "addresses._id": addrId },
+        { $set: { "addresses.$.isDefault": true } },
+      )
+      .exec();
+
+    if (res.matchedCount === 0) {
+      throw new NotFoundException("Address not found");
+    }
+
+    return { id: addressId };
+  }
+
+  async deleteAddress(payload: JwtPayload, addressId: string) {
+    const userId = new Types.ObjectId(payload.userId);
+    const addrId = new Types.ObjectId(addressId);
+
+    const res = await this.userModel.updateOne(
+      { _id: userId, "addresses._id": addrId },
+      { $pull: { addresses: { _id: addrId } } },
+    );
+
+    if (res.modifiedCount === 0) {
+      throw new NotFoundException("Address not found");
+    }
+
+    // res.modifiedCount > 0 แปลว่ามี address ถูกลบจริง
+    return res.modifiedCount > 0;
+  }
 }

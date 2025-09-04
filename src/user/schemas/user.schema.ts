@@ -1,6 +1,7 @@
 // user.schema.ts
 import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
 import { Document } from "mongoose";
+import { AddressInfo, AddressInfoSchema } from "../shared/address.schema";
 
 export type UserDocument = User & Document;
 
@@ -35,6 +36,10 @@ export class User {
 
   @Prop()
   dob: Date;
+
+  // ✅ array ของที่อยู่
+  @Prop({ type: [AddressInfoSchema], default: [] })
+  addresses: AddressInfo[];
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

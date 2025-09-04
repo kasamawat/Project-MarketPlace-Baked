@@ -2,10 +2,10 @@
 import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
 import { Document } from "mongoose";
 
-export type WebhookEventDocument = WebhookEvent & Document;
+export type PaymentWebhookEventDocument = PaymentWebhookEvent & Document;
 
 @Schema({ timestamps: true })
-export class WebhookEvent {
+export class PaymentWebhookEvent {
   @Prop({ required: true, unique: true, index: true })
   eventId!: string; // Stripe event.id
 
@@ -25,7 +25,8 @@ export class WebhookEvent {
   receivedAt?: number; // event.created (epoch sec -> เก็บเป็น ms ก็ได้)
 }
 
-export const WebhookEventSchema = SchemaFactory.createForClass(WebhookEvent);
+export const PaymentWebhookEventSchema =
+  SchemaFactory.createForClass(PaymentWebhookEvent);
 
 // (ทางเลือก) ลบทิ้งอัตโนมัติหลัง 30 วัน
 // WebhookEventSchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 3600 });

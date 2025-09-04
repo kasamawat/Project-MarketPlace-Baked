@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
@@ -19,10 +20,8 @@ import {
 } from "mongoose";
 import { CartService } from "src/cart/cart.service";
 import {
-  computeListStatusBuyer,
   computeListStatusMaster,
   ensureOwnershipMaster,
-  PayCoreStatus,
 } from "./utils/orders-helper";
 import { PaymentsService } from "src/payments/payments.service";
 import { UpdateFilter } from "mongodb";
@@ -42,7 +41,6 @@ import {
   BuyerOrderDetail,
   BuyerOrderDetailItem,
   BuyerOrderListItem,
-  storesSummary,
 } from "./types/buyer-order.types";
 import {
   Reservation,
@@ -50,11 +48,18 @@ import {
 } from "src/inventory/schemas/reservation.schema";
 import { STRIPE_CLIENT } from "src/payments/constants";
 import Stripe from "stripe";
-import {
-  StoreOrderDetailItem,
-  StoreOrderFacet,
-} from "./types/store-order.types";
+import { StoreOrderItems, StoreOrderFacet } from "./types/store-order.types";
 import { StoreListItemDto } from "./dto/store-order-list.dto";
+import {
+  StoreOrderDetail,
+  StoreOrderDetailItem,
+} from "./types/store-order-detail.types";
+import { StoreDetailItemDto } from "./dto/store-order-detail.dto";
+import { computeItemStatus } from "./utils/pack-helper";
+import { PackRequestDto } from "src/store/dto/pack.dto";
+import { computeFulfillmentInfo } from "./helper/order-ship-helper";
+import { ShipRequestDto } from "src/store/dto/ship.dto";
+import { StoreOrderModelLean } from "./types/store-order-model";
 
 @Injectable()
 export class OrdersService {
@@ -186,6 +191,8 @@ export class OrdersService {
                     payload: { totalQty, itemsTotal },
                   },
                 ],
+                shippingAddress: dto.shippingAddress,
+                billingAddress: dto.shippingAddress,
               },
             ],
             { session },
@@ -218,7 +225,8 @@ export class OrdersService {
                   masterOrderId: master._id,
                   storeId: new Types.ObjectId(storeIdStr),
                   buyerId: master.buyerId,
-                  status: "pending_payment",
+                  buyerStatus: "pending_payment",
+                  status: "PENDING",
                   currency: master.currency,
                   itemsCount,
                   pricing: pricingStore,
@@ -250,6 +258,7 @@ export class OrdersService {
                       },
                     ],
                   })),
+                  shippingAddress: dto.shippingAddress,
                 },
               ],
               { session },
@@ -386,7 +395,7 @@ export class OrdersService {
     // get storeOrders all from masterOrderId
     const stores = await this.storeOrderModel
       .find({ masterOrderId: masterOrderIdObj })
-      .select({ _id: 1, itemsCount: 1, status: 1 })
+      .select({ _id: 1, itemsCount: 1, buyerStatus: 1, status: 1 })
       .session(session ?? null)
       .lean()
       .exec();
@@ -399,7 +408,7 @@ export class OrdersService {
 
       const baseFilter = {
         _id: sid,
-        status: { $in: ["pending_payment", "paying", "processing"] },
+        buyerStatus: { $in: ["pending_payment"] },
       };
 
       const initRes = await this.storeOrderModel
@@ -408,23 +417,16 @@ export class OrdersService {
           [
             {
               $set: {
-                status: "paid",
+                buyerStatus: "paid",
                 updatedAt: now,
-                // init เฉพาะที่ยังไม่มี
-                "fulfillment.status": {
-                  $ifNull: ["$fulfillment.status", "UNFULFILLED"],
-                },
-                "fulfillment.shippedItems": {
-                  $ifNull: ["$fulfillment.shippedItems", 0],
-                },
-                "fulfillment.deliveredItems": {
-                  $ifNull: ["$fulfillment.deliveredItems", 0],
-                },
-                "fulfillment.totalItems": {
-                  $ifNull: ["$fulfillment.totalItems", s.itemsCount ?? 0],
-                },
+                "fulfillment.status": "UNFULFILLED",
+                "fulfillment.shippedItems": 0,
+                "fulfillment.deliveredItems": 0,
+                "fulfillment.totalItems": s.itemsCount ?? 0,
                 "fulfillment.timeline": {
-                  $ifNull: ["$fulfillment.timeline", []],
+                  type: "store.pending",
+                  by: "Store",
+                  at: new Date(),
                 },
               },
             },
@@ -610,9 +612,13 @@ export class OrdersService {
     // propagate → StoreOrders
     await this.storeOrderModel
       .updateMany(
-        { masterOrderId: _id, status: { $in: ["pending_payment"] } },
+        { masterOrderId: _id, buyerStatus: { $in: ["pending_payment"] } },
         {
-          $set: { status: "canceled", "items.$[it].fulfillStatus": "CANCELED" },
+          $set: {
+            buyerStatus: "canceled",
+            status: "CANCELED",
+            "items.$[it].fulfillStatus": "CANCELED",
+          },
           $push: {
             timeline: { type: "storeorder.canceled", at: now, by: "system" },
           },
@@ -671,13 +677,17 @@ export class OrdersService {
       )
       .exec();
 
-    if (res.matchedCount === 0) return; // idempotent for other statuses
+    if (res.matchedCount === 0) return; // idempotent for other buyerStatus
 
     await this.storeOrderModel
       .updateMany(
-        { masterOrderId: _id, status: { $in: ["pending_payment"] } },
+        { masterOrderId: _id, buyerStatus: { $in: ["pending_payment"] } },
         {
-          $set: { status: "expired", "items.$[it].fulfillStatus": "CANCELED" },
+          $set: {
+            buyerStatus: "expired",
+            status: "CANCELED",
+            "items.$[it].fulfillStatus": "CANCELED",
+          },
           $push: {
             timeline: { type: "storeorder.expired", at: now, by: "system" },
           },
@@ -710,33 +720,17 @@ export class OrdersService {
     const limit = Math.min(50, Math.max(1, Number(q.limit) || 10));
     const skip = (page - 1) * limit;
 
-    // map status filter
+    // 1) master-level filter
     const filter: Record<string, any> = { buyerId: userIdObj };
-    if (q.status && q.status !== "all") {
-      switch (q.status) {
-        case "paid":
-        case "expired":
-        case "canceled":
-        case "pending_payment":
-          filter.status = q.status;
-          break;
-        case "paying":
-          filter.status = "pending_payment";
-          filter["payment.status"] = "requires_action";
-          break;
-        case "processing":
-          filter.status = "pending_payment";
-          filter["payment.status"] = "processing";
-          break;
-      }
+    if (q.buyerStatus) {
+      filter.status = q.buyerStatus; // ตรงกับ masterorders.status
     }
 
-    // pipeline: Master → lookup StoreOrders → flatten items → preview 2 ชิ้น
-    const pipeline: import("mongoose").PipelineStage[] = [
+    const pipeline: PipelineStage[] = [
       { $match: filter },
       { $sort: { createdAt: -1 as 1 | -1 } },
 
-      // 1) ดึง StoreOrders ทั้งก้อน พร้อมชื่อร้าน + items ที่ต้องใช้
+      // 2) join storeorders (+ store name)
       {
         $lookup: {
           from: "storeorders",
@@ -755,22 +749,33 @@ export class OrdersService {
               },
             },
             { $set: { storeDoc: { $first: "$storeDoc" } } },
-            // เก็บ field ที่ต้องใช้ต่อทั้งหมด (รวม items)
             {
               $project: {
                 _id: 1,
                 storeId: 1,
                 storeName: "$storeDoc.name",
                 storeStatus: "$status",
-                items: 1, // ← ใช้ทั้ง summary และ preview
+                buyerStatus: "$buyerStatus",
+                items: 1,
               },
             },
           ],
-          as: "sos", // store orders (rich)
+          as: "sos",
         },
       },
 
-      // 2) คำนวณ storesSummary จาก sos
+      // 3) ถ้ามี storeStatus ให้กรองเฉพาะ master ที่มี store order อย่างน้อย 1 อันตรงสถานะ
+      ...(q.storeStatus
+        ? ([
+            {
+              $match: {
+                sos: { $elemMatch: { storeStatus: q.storeStatus.trim() } },
+              },
+            },
+          ] as PipelineStage[])
+        : ([] as PipelineStage[])),
+
+      // 4) สร้าง storesSummary
       {
         $addFields: {
           storesSummary: {
@@ -782,7 +787,7 @@ export class OrdersService {
                 storeId: "$$so.storeId",
                 storeName: "$$so.storeName",
                 storeStatus: "$$so.storeStatus",
-                // total item in store
+                buyerStatus: "$$so.buyerStatus",
                 itemsCount: {
                   $sum: {
                     $map: {
@@ -792,7 +797,6 @@ export class OrdersService {
                     },
                   },
                 },
-                // total price in store
                 itemsTotal: {
                   $sum: {
                     $map: {
@@ -813,7 +817,6 @@ export class OrdersService {
                     },
                   },
                 },
-                // preview item in store
                 itemsPreview: {
                   $slice: [
                     {
@@ -838,7 +841,7 @@ export class OrdersService {
         },
       },
 
-      // 3) รวม items จากทุก store เพื่อทำ preview / totals (fallback ถ้า master ไม่มีเก็บ)
+      // 5) รวม items เพื่อ preview/total (fallback)
       {
         $addFields: {
           allItems: {
@@ -892,7 +895,7 @@ export class OrdersService {
         },
       },
 
-      // 4) เตรียมฟิลด์ list + payment.status สำหรับ map เป็น userStatus
+      // 6) ฟิลด์ที่ส่งออก
       {
         $project: {
           _id: 1,
@@ -902,13 +905,13 @@ export class OrdersService {
           itemsCount: { $ifNull: ["$itemsCount", "$itemsCountCalc"] },
           itemsTotal: { $ifNull: ["$pricing.itemsTotal", "$itemsTotalCalc"] },
           reservationExpiresAt: 1,
-          status: 1,
-          payment: { status: "$payment.status" },
+          status: 1, // master status (= buyerStatus)
+          payment: { status: "$payment.status" }, // เผื่อ compute badge
           storesSummary: 1,
         },
       },
 
-      // 5) facet → data + total
+      // 7) facet
       {
         $facet: {
           data: [{ $skip: skip }, { $limit: limit }],
@@ -928,15 +931,13 @@ export class OrdersService {
       itemsCount: m.itemsCount ?? 0,
       itemsTotal: m.itemsTotal ?? 0,
       currency: m.currency ?? "THB",
-      userStatus: computeListStatusBuyer({
-        status: m.status as PayCoreStatus,
-        payment: m.payment,
-      }), // ใช้ master.status + payment.status + (optionally) storesSummary
+      buyerStatus: m.status, // ใช้ตรง ๆ ตาม master.status
       reservationExpiresAt: m.reservationExpiresAt?.toISOString?.(),
-      storesSummary: m.storesSummary.map((s: storesSummary) => ({
+      storesSummary: (m.storesSummary ?? []).map((s) => ({
         storeOrderId: String(s.storeOrderId),
         storeId: String(s.storeId),
         storeName: s.storeName ?? "",
+        buyerStatus: s.buyerStatus,
         storeStatus: s.storeStatus,
         itemsCount: s.itemsCount ?? 0,
         itemsTotal: s.itemsTotal ?? 0,
@@ -954,7 +955,7 @@ export class OrdersService {
 
     const masterOrderIdObj = new Types.ObjectId(masterOrderId);
 
-    const pipeline: import("mongoose").PipelineStage[] = [
+    const pipeline: PipelineStage[] = [
       { $match: { _id: masterOrderIdObj } },
       {
         $lookup: {
@@ -967,6 +968,9 @@ export class OrdersService {
                   $and: [{ $eq: ["$masterOrderId", "$$mid"] }],
                 },
               },
+            },
+            {
+              $set: { storeStatus: "$status" },
             },
           ],
           as: "stores",
@@ -996,7 +1000,7 @@ export class OrdersService {
       masterOrderId: String(facet._id),
       createdAt: facet.createdAt?.toISOString?.() ?? new Date().toISOString(),
       currency: facet.currency ?? "THB",
-      userStatus: computeListStatusMaster(facet),
+      buyerStatus: computeListStatusMaster(facet),
       reservationExpiresAt: facet.reservationExpiresAt?.toISOString?.(),
       payment: facet.payment,
       pricing: facet.pricing && {
@@ -1009,7 +1013,8 @@ export class OrdersService {
       stores: (facet.stores ?? []).map((s) => ({
         storeOrderId: String(s._id),
         storeId: String(s.storeId),
-        status: s.status,
+        buyerStatus: s.buyerStatus,
+        storeStatus: s.storeStatus,
         pricing: {
           itemsTotal: s.pricing?.itemsTotal ?? 0,
           grandTotal: s.pricing?.grandTotal ?? s.pricing?.itemsTotal ?? 0,
@@ -1044,7 +1049,7 @@ export class OrdersService {
     const masterOrderIdObj = new Types.ObjectId(masterOrderId);
     const storeOrderIdObj = new Types.ObjectId(storeOrderId);
 
-    const pipeline: import("mongoose").PipelineStage[] = [
+    const pipeline: PipelineStage[] = [
       { $match: { _id: masterOrderIdObj } },
       {
         $lookup: {
@@ -1114,7 +1119,7 @@ export class OrdersService {
       masterOrderId: String(facet._id),
       createdAt: facet.createdAt?.toISOString?.() ?? new Date().toISOString(),
       currency: facet.currency ?? "THB",
-      userStatus: computeListStatusMaster(facet),
+      buyerStatus: computeListStatusMaster(facet),
       reservationExpiresAt: facet.reservationExpiresAt?.toISOString?.(),
       payment: facet.payment && {
         provider: facet.payment.provider,
@@ -1134,7 +1139,7 @@ export class OrdersService {
       stores: (facet.stores ?? []).map((s) => ({
         storeOrderId: String(s._id),
         storeId: String(s.storeId),
-        status: s.status,
+        buyerStatus: s.buyerStatus,
         pricing: {
           itemsTotal: s.pricing?.itemsTotal ?? 0,
           grandTotal: s.pricing?.grandTotal ?? s.pricing?.itemsTotal ?? 0,
@@ -1313,6 +1318,7 @@ export class OrdersService {
     return out;
   }
 
+  // function clear cart when paid success
   async finalizeCartAfterPaid(
     masterOrderId: string,
     session?: ClientSession,
@@ -1465,111 +1471,80 @@ export class OrdersService {
     }
     const storeIdObj = new Types.ObjectId(storeId);
 
-    // -------- parse payStatus (StoreOrder.status) ----------
-    // q.payStatus: "paid" | "pending_payment" | "canceled" | "expired" | "all"
-    const payStatuses =
-      q.payStatus && q.payStatus !== "all"
-        ? q.payStatus
+    // -------- parse buyerStatus (payStatus) ----------
+    const buyerStatuses =
+      q.buyerStatus && q.buyerStatus !== "all"
+        ? q.buyerStatus
             .split(",")
             .map((s) => s.trim())
             .filter(Boolean)
         : null;
 
-    // -------- parse fulfillStatus (ต่อ item) ----------
-    // รองรับ "UNFULFILLED" ให้ขยายเป็น ["PENDING","PACKED"]
-    const rawFulfill =
-      q.fulfillStatus && q.fulfillStatus !== "all"
-        ? q.fulfillStatus
-            .split(",")
+    // -------- parse storeStatus ----------
+    const rawStoreStatus =
+      q.storeStatus && q.storeStatus !== "all"
+        ? q.storeStatus
+            ?.split(",")
             .map((s) => s.trim())
             .filter(Boolean)
         : [];
-    const expanded = new Set<string>();
-    for (const s of rawFulfill) {
-      if (s === "UNFULFILLED") {
-        expanded.add("PENDING");
-        expanded.add("PACKED");
-      } else {
-        expanded.add(s);
-      }
-    }
-    const fulfillArray = Array.from(expanded); // [] = ไม่กรอง
+    const storeStatusArray = Array.from(new Set(rawStoreStatus));
 
-    // --------- $match ระดับเอกสาร StoreOrder ----------
-    const topMatch: Record<string, any> = { storeId: storeIdObj };
-    if (payStatuses?.length) {
-      topMatch.status =
-        payStatuses.length > 1 ? { $in: payStatuses } : payStatuses[0];
-    }
-
-    // --------- Pipeline ----------
+    // -------- Pipeline ----------
     const pipeline: PipelineStage[] = [
-      { $match: topMatch },
+      {
+        $match: {
+          storeId: storeIdObj,
+          ...(storeStatusArray.length
+            ? { status: { $in: storeStatusArray } }
+            : {}),
+          ...(buyerStatuses?.length
+            ? { buyerStatus: { $in: buyerStatuses } }
+            : {}),
+        },
+      },
       { $sort: { createdAt: -1 as 1 | -1 } },
 
-      // add usen, email buyer
+      // Buyer info
       {
         $lookup: {
           from: "users",
           let: { uid: "$buyerId" },
           pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [{ $eq: ["$_id", "$$uid"] }],
-                },
-              },
-            },
-            {
-              $project: {
-                _id: 1,
-                username: 1,
-                email: 1,
-              },
-            },
+            { $match: { $expr: { $eq: ["$_id", "$$uid"] } } },
+            { $project: { _id: 1, username: 1, email: 1 } },
           ],
           as: "buyer",
         },
       },
       { $set: { buyer: { $first: "$buyer" } } },
 
-      // ถ้ามี fulfill filter → สร้างฟิลด์ filtered เป็น items ที่ผ่านเงื่อนไข
-      // ถ้าไม่มี filter → ให้ filtered = items ทั้งหมด (เพื่อคำนวณ/preview)
-      {
-        $set: {
-          filtered: fulfillArray.length
-            ? {
-                $filter: {
-                  input: "$items",
-                  as: "it",
-                  cond: { $in: ["$$it.fulfillStatus", fulfillArray] },
-                },
-              }
-            : "$items",
-        },
-      },
-
-      // ถ้ามี fulfill filter → ตัดเอกสารที่ไม่มี item ตรงเงื่อนไขออก
-      ...(fulfillArray.length
-        ? ([
-            { $match: { $expr: { $gt: [{ $size: "$filtered" }, 0] } } },
-          ] as PipelineStage[])
-        : ([] as PipelineStage[])),
-
-      // คำนวณจำนวน/ยอด + ทำ preview
+      // คำนวณ summary/preview จาก items ทั้งหมด (ไม่ต้อง filter แล้ว)
       {
         $addFields: {
           itemsCount: {
-            $sum: { $map: { input: "$filtered", as: "f", in: "$$f.quantity" } },
+            $sum: {
+              $map: {
+                input: { $ifNull: ["$items", []] },
+                as: "f",
+                in: "$$f.quantity",
+              },
+            },
           },
           itemsTotal: {
-            $sum: { $map: { input: "$filtered", as: "f", in: "$$f.subtotal" } },
+            $sum: {
+              $map: {
+                input: { $ifNull: ["$items", []] },
+                as: "f",
+                in: "$$f.subtotal",
+              },
+            },
           },
           itemsPreview: {
             $slice: [
               {
                 $map: {
-                  input: "$filtered",
+                  input: { $ifNull: ["$items", []] },
                   as: "it",
                   in: {
                     name: "$$it.productName",
@@ -1579,20 +1554,21 @@ export class OrdersService {
                   },
                 },
               },
-              2, // แสดงตัวอย่าง 2 ชิ้น
+              2,
             ],
           },
         },
       },
 
+      // Project fields
       {
         $project: {
           _id: 1,
           masterOrderId: 1,
           createdAt: 1,
           currency: 1,
-          status: 1, // pay-status ของ store order
-          pricingGrandTotal: "$pricing.grandTotal",
+          storeStatus: 1, // ใช้ filter ได้โดยตรง
+          buyerStatus: 1, // payStatus
           itemsPreview: 1,
           itemsCount: 1,
           itemsTotal: 1,
@@ -1613,20 +1589,601 @@ export class OrdersService {
       .aggregate<StoreOrderFacet>(pipeline)
       .exec();
 
-    const items: StoreOrderDetailItem[] = (facet?.data ?? []).map((o) => ({
+    const items: StoreOrderItems[] = (facet?.data ?? []).map((o) => ({
       masterOrderId: String(o.masterOrderId),
       storeOrderId: String(o._id),
       createdAt: o.createdAt?.toISOString?.() ?? new Date().toISOString(),
       itemsPreview: o.itemsPreview ?? [],
       itemsCount: o.itemsCount ?? 0,
       itemsTotal: o.itemsTotal ?? 0,
-      currency: o.currency,
-      status: o.status,
+      currency: o.currency ?? "THB",
+      buyerStatus: o.buyerStatus,
+      storeStatus: o.storeStatus,
       fulfillment: o.fulfillment,
       buyer: o.buyer,
     }));
 
     const total = facet?.total?.[0]?.count ?? 0;
     return { items, total };
+  }
+
+  async getStoreOrderDetail(
+    storeOrderId: string,
+    storeId: string,
+  ): Promise<StoreDetailItemDto> {
+    if (!Types.ObjectId.isValid(storeId)) {
+      throw new BadRequestException("Invalid storeOrderId");
+    }
+    if (!Types.ObjectId.isValid(storeOrderId)) {
+      throw new BadRequestException("Invalid storeOrderId");
+    }
+    const storeIdObj = new Types.ObjectId(storeId);
+    const storeOrderIdObj = new Types.ObjectId(storeOrderId);
+
+    const pipeline: PipelineStage[] = [
+      {
+        $match: {
+          _id: storeOrderIdObj,
+          storeId: storeIdObj,
+        },
+      },
+      // join buyer
+      {
+        $lookup: {
+          from: "users",
+          let: { uid: "$buyerId" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$uid"] } } },
+            { $project: { _id: 1, username: 1, email: 1 } },
+          ],
+          as: "buyer",
+        },
+      },
+      { $set: { buyer: { $first: "$buyer" } } },
+
+      // join master order
+      {
+        $lookup: {
+          from: "masterorders",
+          let: { mid: "$masterOrderId" },
+          pipeline: [
+            { $match: { $expr: { $eq: ["$_id", "$$mid"] } } },
+            { $project: { _id: 1, payment: 1, shippingAddress: 1 } },
+          ],
+          as: "masterOrders",
+        },
+      },
+      {
+        $set: {
+          masterOrder: { $first: "$masterOrders" },
+        },
+      },
+
+      // compute item summary/preview
+      {
+        $addFields: {
+          itemsCount: {
+            $sum: {
+              $map: { input: "$items", as: "f", in: "$$f.quantity" },
+            },
+          },
+          itemsTotal: {
+            $sum: {
+              $map: { input: "$items", as: "f", in: "$$f.subtotal" },
+            },
+          },
+          itemsPreview: {
+            $map: {
+              input: "$items",
+              as: "it",
+              in: {
+                productId: "$$it.productId",
+                skuId: "$$it.skuId",
+                name: "$$it.productName",
+                attributes: "$$it.attributes",
+                quantity: "$$it.quantity",
+                price: "$$it.unitPrice",
+                subtotal: "$$it.subtotal",
+                packedQty: "$$it.packedQty",
+                shippedQty: "$$it.shippedQty",
+                deliveredQty: "$$it.deliveredQty",
+                canceledQty: "$$it.canceledQty",
+                fulfillStatus: "$$it.fulfillStatus",
+              },
+            },
+          },
+        },
+      },
+
+      // final shape
+      {
+        $project: {
+          _id: 1,
+          masterOrderId: 1,
+          storeId: 1,
+          createdAt: 1,
+          currency: 1,
+          // status: 1, // pay-status ของ store order
+          storeStatus: "$status",
+          buyerStatus: 1,
+          payment: "$masterOrder.payment",
+          pricingGrandTotal: "$pricing.grandTotal",
+          shippingAddress: "$masterOrder.shippingAddress",
+          itemsPreview: 1,
+          itemsCount: 1,
+          itemsTotal: 1,
+          fulfillment: 1,
+          buyer: 1,
+        },
+      },
+    ];
+
+    const [storeDetail] = await this.storeOrderModel
+      .aggregate<StoreOrderDetail>(pipeline)
+      .exec();
+
+    const items: StoreOrderDetailItem = {
+      masterOrderId: String(storeDetail.masterOrderId),
+      storeOrderId: String(storeDetail._id),
+      storeId: String(storeDetail.storeId),
+      storeStatus: storeDetail.storeStatus,
+      buyerStatus: storeDetail.buyerStatus,
+      buyer: storeDetail.buyer,
+      shippingAddress: storeDetail.shippingAddress,
+      itemsPreview: storeDetail.itemsPreview,
+      itemsCount: storeDetail.itemsCount ?? 0,
+      itemsTotal: storeDetail.itemsTotal ?? 0,
+      payment: storeDetail.payment,
+      fulfillment: storeDetail.fulfillment,
+      createdAt:
+        storeDetail.createdAt?.toISOString?.() ?? new Date().toISOString(),
+      updatedAt:
+        storeDetail.updatedAt?.toISOString?.() ?? new Date().toISOString(),
+    };
+
+    return items;
+  }
+
+  /**
+   * Update fulfill status for a specific item (skuId) or all items in a store order.
+   * - Validates allowed status
+   * - Prevents backward transitions (PENDING->PACKED->SHIPPED->DELIVERED; CANCELED is terminal)
+   * - Updates fulfillment summary + timeline
+   * - Returns latest order (lean)
+   */
+  async packStoreOrder(
+    storeId: string,
+    storeOrderId: string,
+    dto: PackRequestDto,
+  ) {
+    const storeIdObj = new Types.ObjectId(storeId);
+    const storeOrderIdObj = new Types.ObjectId(storeOrderId);
+
+    const order = await this.storeOrderModel
+      .findOne({
+        _id: storeOrderIdObj,
+        storeId: storeIdObj,
+      })
+      .exec();
+
+    if (!order) throw new NotFoundException("Store order not found");
+    if (order.buyerStatus !== "paid") {
+      // ธุรกิจคุณอาจอนุญาตให้แพ็กตอนยังไม่ paid ก็ได้
+      throw new ForbiddenException("Order not paid");
+    }
+
+    // สร้าง map items ในออเดอร์เพื่อเช็ค outstandings
+    const byKey = new Map<
+      string,
+      {
+        idx: number;
+        qty: number;
+        packed: number;
+        shipped: number;
+        delivered: number;
+        canceled: number;
+      }
+    >();
+    order.items.forEach((it, idx) => {
+      const key = `${String(it.productId)}::${String(it.skuId)}`;
+      byKey.set(key, {
+        idx,
+        qty: it.quantity,
+        packed: it.packedQty ?? 0,
+        shipped: it.shippedQty ?? 0,
+        delivered: it.deliveredQty ?? 0,
+        canceled: it.canceledQty ?? 0,
+      });
+    });
+
+    // ตรวจ payload และคำนวณว่าจะ $inc อะไร
+    const incMap: Record<string, number> = {}; // path -> +qty
+    const pkgItems: Record<string, unknown>[] = [];
+
+    for (const it of dto.items) {
+      const key = `${it.productId}::${it.skuId}`;
+      const row = byKey.get(key);
+      if (!row) throw new BadRequestException(`Item not found: ${key}`);
+
+      const outstanding = Math.max(0, row.qty - row.packed - row.canceled);
+      if (it.qty <= 0) throw new BadRequestException(`Invalid qty for ${key}`);
+      if (it.qty > outstanding) {
+        throw new BadRequestException(
+          `Qty exceed outstanding for ${key} (${it.qty} > ${outstanding})`,
+        );
+      }
+
+      // สร้าง $inc สำหรับ items.$[itX].packedQty
+      const filterIdx = pkgItems.length; // ใช้ idx เดียวกับ arrayFilters
+      incMap[`items.$[it${filterIdx}].packedQty`] =
+        (incMap[`items.$[it${filterIdx}].packedQty`] || 0) + it.qty;
+
+      // เก็บรายการลงกล่อง (snapshot ชื่อ)
+      const origin = order.items[row.idx];
+      pkgItems.push({
+        productId: new Types.ObjectId(it.productId),
+        skuId: new Types.ObjectId(it.skuId),
+        qty: it.qty,
+        productName: origin?.productName,
+      });
+    }
+
+    const newPackage = {
+      code: undefined,
+      boxType: dto.package?.boxType,
+      weightKg: dto.package?.weightKg,
+      dimension: dto.package?.dimension,
+      note: dto.package?.note,
+      items: pkgItems,
+      createdAt: new Date(),
+    };
+
+    // ทำใน transaction (ถ้าคุณใช้ replica set) จะปลอดภัยกว่า
+    const session = await this.conn.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await this.storeOrderModel.updateOne(
+          { _id: storeOrderIdObj, storeId: storeIdObj },
+          {
+            $push: {
+              "fulfillment.packages": newPackage,
+              "fulfillment.timeline": {
+                type: "store.packed",
+                at: new Date(),
+                by: "Store",
+                payload: dto.package,
+              },
+            },
+            $inc: incMap,
+          },
+          {
+            arrayFilters: pkgItems.map((x, i) => ({
+              [`it${i}.productId`]: x.productId,
+              [`it${i}.skuId`]: x.skuId,
+            })),
+            session,
+          },
+        );
+
+        // อ่านกลับมาเพื่อคำนวณสถานะ items ตามตัวนับล่าสุด
+        const updated = await this.storeOrderModel
+          .findOne({ _id: storeOrderIdObj })
+          .session(session);
+        if (!updated)
+          throw new NotFoundException("Store order not found after update");
+
+        // sync fulfillStatus per item
+        updated.items = updated.items.map((it) => {
+          const status = computeItemStatus(
+            it.quantity,
+            it.packedQty ?? 0,
+            it.shippedQty ?? 0,
+            it.deliveredQty ?? 0,
+            it.canceledQty ?? 0,
+          );
+          // add time line in items
+          it.fulfillTimeline.push({
+            type: "store.packed",
+            by: "Store",
+            at: new Date(),
+          });
+          if (it.fulfillStatus !== status) it.fulfillStatus = status;
+          return it;
+        });
+
+        // calulate summary store and update FulfillmentInfo
+        const summary = computeFulfillmentInfo(
+          updated.items.map((x) => ({
+            quantity: x.quantity,
+            shippedQty: x.shippedQty,
+            deliveredQty: x.deliveredQty,
+            canceledQty: x.canceledQty,
+          })),
+          updated.fulfillment,
+        );
+        updated.fulfillment = {
+          ...summary,
+          packages: summary.packages,
+          shipments: summary.shipments,
+          timeline: summary.timeline,
+        };
+
+        // สรุประดับร้าน (optional): ถ้าทั้งหมด PACKED/SHIPPED/DELIVERED → set order.status ให้สอดคล้อง
+        const allQty = updated.items.reduce((s, x) => s + x.quantity, 0);
+        const deliveredQty = updated.items.reduce(
+          (s, x) => s + (x.deliveredQty ?? 0),
+          0,
+        );
+        const shippedQty = updated.items.reduce(
+          (s, x) => s + (x.shippedQty ?? 0),
+          0,
+        );
+        const packedQty = updated.items.reduce(
+          (s, x) => s + (x.packedQty ?? 0),
+          0,
+        );
+
+        let newStoreStatus = updated.status;
+        if (deliveredQty >= allQty) newStoreStatus = "DELIVERED";
+        else if (shippedQty >= allQty) newStoreStatus = "SHIPPED";
+        else if (packedQty > 0) newStoreStatus = "PACKED";
+        else newStoreStatus = "PENDING";
+
+        updated.status = newStoreStatus;
+        await updated.save({ session });
+      });
+    } finally {
+      if (session) await session.endSession();
+    }
+
+    // ส่งกลับรายละเอียดล่าสุด (ใช้เมธอดที่คุณมีอยู่แล้วจะดีที่สุด)
+    return this.getStoreOrderDetail(storeOrderId, storeId);
+  }
+
+  async shipStoreOrder(
+    storeId: string,
+    storeOrderId: string,
+    dto: ShipRequestDto,
+  ) {
+    const storeIdObj = new Types.ObjectId(storeId);
+    const storeOrderIdObj = new Types.ObjectId(storeOrderId);
+
+    const order = await this.storeOrderModel
+      .findOne({
+        _id: storeOrderIdObj,
+        storeId: storeIdObj,
+      })
+      .lean<StoreOrderModelLean>()
+      .exec();
+
+    if (!order) throw new NotFoundException("Store order not found");
+    if (order.buyerStatus !== "paid") {
+      // ถ้านโยบายอนุญาต ship ก่อน paid ก็ลบเงื่อนไขนี้ได้
+      throw new ForbiddenException("Order not paid");
+    }
+
+    // 1. Check packages is true
+    const ids = dto.packageIds.map((id) => {
+      if (!Types.ObjectId.isValid(id)) {
+        throw new BadRequestException(`Invalid packageId: ${id}`);
+      }
+      return new Types.ObjectId(id);
+    });
+
+    const packages = (order.fulfillment?.packages ?? []).filter((p) =>
+      ids.some((_id) => _id.equals(String(p._id))),
+    );
+
+    if (!packages.length) throw new NotFoundException("Packages not found");
+
+    // 2. check packageIds if before not ship (otherwise: double-ship)
+    const shippedPakIds = new Set(
+      (order.fulfillment?.shipments ?? [])
+        .flatMap((s) => s.packageIds ?? [])
+        .map((x: Types.ObjectId) => String(x)),
+    );
+    for (const id of ids) {
+      if (shippedPakIds.has(String(id))) {
+        throw new BadRequestException(`Package already shipped: ${String(id)}`);
+      }
+    }
+
+    // 3. sum qty per SKU from packages is chose
+    // key = productId::skuId -> sum qty
+    const byKeyQty: Record<string, number> = {};
+    for (const p of packages) {
+      for (const it of p.items ?? []) {
+        const key = `${String(it.productId)}::${String(it.skuId)}`;
+        byKeyQty[key] = (byKeyQty[key] ?? 0) + (it.qty ?? 0);
+      }
+    }
+
+    if (!Object.keys(byKeyQty).length) {
+      throw new BadRequestException("Selected packages contain no items");
+    }
+
+    // 4. check not over outstanding (follow shippedQty)
+    // and already incMap + arrayFilters
+    const orderItemIndexByKey = new Map<string, number>();
+    order.items.forEach((it, idx) => {
+      const k = `${String(it.productId)}::${String(it.skuId)}`;
+      orderItemIndexByKey.set(k, idx);
+    });
+
+    const incMap: Record<string, number> = {};
+    const arrayFilters: Record<string, any>[] = [];
+    let filterIdx = 0;
+
+    for (const [key, addQty] of Object.entries(byKeyQty)) {
+      const idx = orderItemIndexByKey.get(key);
+      if (idx === undefined)
+        throw new BadRequestException(`Item not found for ${key}`);
+      const origin = order.items[idx];
+
+      const qty = origin.quantity || 0;
+      const shipped = origin.shippedQty || 0;
+      const canceled = origin.canceledQty || 0;
+      const outstandingShip = Math.max(0, qty - shipped - canceled);
+      if (addQty <= 0) continue;
+      if (addQty > outstandingShip) {
+        throw new BadRequestException(
+          `Ship qty exceed outstanding for ${key} (${addQty} > ${outstandingShip})`,
+        );
+      }
+
+      // already $inc items.$[itX].shippedQty
+      incMap[`items.$[it${filterIdx}].shippedQty`] =
+        (incMap[`items.$[it${filterIdx}].shippedQty`] ?? 0) + addQty;
+
+      const [productId, skuId] = key.split("::");
+      arrayFilters.push({
+        [`it${filterIdx}.productId`]: new Types.ObjectId(productId),
+        [`it${filterIdx}.skuId`]: new Types.ObjectId(skuId),
+      });
+      filterIdx++;
+    }
+
+    // 5. already shipment new
+    const shippedAtISO = dto.shipment.shippedAt
+      ? new Date(dto.shipment.shippedAt)
+      : new Date();
+    const newShipmentId = new Types.ObjectId();
+
+    const shipmentDoc = {
+      _id: newShipmentId,
+      carrier: dto.shipment.carrier,
+      trackingNumber: dto.shipment.trackingNumber,
+      method: dto.shipment.method,
+      shippedAt: shippedAtISO,
+      packageIds: ids,
+      note: dto.shipment.note,
+      createdAt: new Date(),
+    };
+
+    // create arrayFilter for packages is chose
+    const pkgFilters = ids.map((pid, i) => ({ [`p${i}._id`]: pid }));
+
+    // create $set for packages is chose ref this shipment
+    const entries: [string, unknown][] = ids.flatMap((pid, i) => [
+      [`fulfillment.packages.$[p${i}].shipmentId`, newShipmentId],
+      [`fulfillment.packages.$[p${i}].shippedAt`, shippedAtISO],
+    ]);
+    const setPackageShipmentFields = Object.fromEntries(entries);
+
+    // 6. transaction
+    const session = await this.conn.startSession();
+    try {
+      await session.withTransaction(async () => {
+        // 6.1 push shipment + timeline, inc shippedQty
+        await this.storeOrderModel.updateOne(
+          { _id: storeOrderIdObj, storeId: storeIdObj },
+          {
+            $push: {
+              "fulfillment.shipments": shipmentDoc,
+              "fulfillment.timeline": {
+                type: "store.shipped",
+                at: new Date(),
+                by: "Store",
+                payload: dto.shipment,
+              },
+            },
+            $set: {
+              ...setPackageShipmentFields,
+              latestTrackingNo: dto.shipment.trackingNumber,
+              shippedAt: shippedAtISO,
+            },
+            $inc: incMap,
+          },
+          {
+            // merge arrayfilters of items + packages
+            arrayFilters: [...arrayFilters, ...pkgFilters],
+            session,
+          },
+        );
+
+        // 6.2 back read in session for sync statuses + summary fulfillment + set StoreOrder.status
+        const updated = await this.storeOrderModel
+          .findOne({ _id: storeOrderIdObj, storeId: storeIdObj })
+          .session(session);
+        if (!updated)
+          throw new NotFoundException("Store order not found after ship");
+
+        // sync items
+        updated.items = updated.items.map((it) => {
+          const status = computeItemStatus(
+            it.quantity || 0,
+            it.packedQty || 0,
+            it.shippedQty || 0,
+            it.deliveredQty || 0,
+            it.canceledQty || 0,
+          );
+          // add time line in items
+          it.fulfillTimeline.push({
+            type: "store.shipped",
+            by: "Store",
+            at: new Date(),
+          });
+          if (it.fulfillStatus !== status) it.fulfillStatus = status;
+          return it;
+        });
+
+        // calculate fulfillment (status + counters) โดยคง arrays เดิม
+        const totalItems = updated.items.reduce(
+          (s, x) => s + (x.quantity || 0),
+          0,
+        );
+        const shippedItems = updated.items.reduce(
+          (s, x) => s + (x.shippedQty || 0),
+          0,
+        );
+        const deliveredItems = updated.items.reduce(
+          (s, x) => s + (x.deliveredQty || 0),
+          0,
+        );
+        const canceledItems = updated.items.reduce(
+          (s, x) => s + (x.canceledQty || 0),
+          0,
+        );
+
+        let fulfillStatus:
+          | "UNFULFILLED"
+          | "PARTIALLY_FULFILLED"
+          | "FULFILLED"
+          | "CANCELED"
+          | "RETURNED" = "UNFULFILLED";
+        if (canceledItems >= totalItems && totalItems > 0)
+          fulfillStatus = "CANCELED";
+        else if (deliveredItems >= totalItems && totalItems > 0)
+          fulfillStatus = "FULFILLED";
+        else if (shippedItems > 0 || deliveredItems > 0)
+          fulfillStatus = "PARTIALLY_FULFILLED";
+        else fulfillStatus = "UNFULFILLED";
+
+        updated.fulfillment = {
+          status: fulfillStatus,
+          totalItems,
+          shippedItems,
+          deliveredItems,
+          packages: updated.fulfillment?.packages ?? [],
+          shipments: updated.fulfillment?.shipments ?? [],
+          timeline: updated.fulfillment?.timeline ?? [],
+        };
+
+        // stage view of store
+        if (deliveredItems >= totalItems && totalItems > 0)
+          updated.status = "DELIVERED";
+        else if (shippedItems >= totalItems && totalItems > 0)
+          updated.status = "SHIPPED";
+        else if (updated.items.reduce((s, x) => s + (x.packedQty || 0), 0) > 0)
+          updated.status = "PACKED";
+        else updated.status = "PENDING";
+
+        await updated.save({ session });
+      });
+
+      return this.getStoreOrderDetail(storeOrderId, storeId);
+    } finally {
+      await session.endSession();
+    }
   }
 }

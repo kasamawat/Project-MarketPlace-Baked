@@ -2,35 +2,18 @@ import { ApiPropertyOptional } from "@nestjs/swagger";
 import { IsIn, IsInt, IsOptional, Min } from "class-validator";
 
 export class ListOrdersDto {
+  // ✅ ใหม่: ฟิลเตอร์ตามแท็บใหม่
   @ApiPropertyOptional({
-    enum: [
-      "all",
-      "pending_payment",
-      "paying",
-      "processing",
-      "paid",
-      "expired",
-      "canceled",
-    ],
+    enum: ["pending_payment", "paid", "expired", "canceled"],
   })
   @IsOptional()
-  @IsIn([
-    "all",
-    "pending_payment",
-    "paying",
-    "processing",
-    "paid",
-    "expired",
-    "canceled",
-  ])
-  status?:
-    | "all"
-    | "pending_payment"
-    | "paying"
-    | "processing"
-    | "paid"
-    | "expired"
-    | "canceled" = "all";
+  @IsIn(["pending_payment", "paid", "expired", "canceled"])
+  buyerStatus?: "pending_payment" | "paid" | "expired" | "canceled";
+
+  @ApiPropertyOptional({ enum: ["PENDING", "PACKED", "SHIPPED", "DELIVERED"] })
+  @IsOptional()
+  @IsIn(["PENDING", "PACKED", "SHIPPED", "DELIVERED"])
+  storeStatus?: "PENDING" | "PACKED" | "SHIPPED" | "DELIVERED";
 
   @ApiPropertyOptional({ default: 1 })
   @IsOptional()

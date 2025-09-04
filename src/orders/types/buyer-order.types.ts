@@ -1,4 +1,5 @@
 import { Types } from "mongoose";
+import { MasterStatus, StoreStatus } from "../schemas/shared.subdocs";
 
 export type BuyerOrderListItem = {
   masterOrderId: string;
@@ -12,7 +13,7 @@ export type BuyerOrderListItem = {
   itemsCount: number;
   itemsTotal: number;
   currency: string;
-  userStatus: BuyerListStatus;
+  buyerStatus: MasterStatus;
   reservationExpiresAt?: string;
   storesSummary: storesSummary[];
 };
@@ -21,7 +22,7 @@ export type BuyerOrderDetail = {
   masterOrderId: string;
   createdAt: string;
   currency: string;
-  userStatus: BuyerListStatus;
+  buyerStatus: MasterStatus;
   reservationExpiresAt?: string;
   payment?: {
     provider?: string;
@@ -51,13 +52,8 @@ export type storesSummary = {
   storeOrderId: string;
   storeId: string;
   storeName: string;
-  storeStatus:
-    | "PENDING"
-    | "PACKED"
-    | "SHIPPED"
-    | "DELIVERED"
-    | "CANCELED"
-    | "RETURNED";
+  buyerStatus: MasterStatus;
+  storeStatus: StoreStatus;
   itemsCount: number;
   itemsTotal: number;
   itemsPreview: {
@@ -82,7 +78,7 @@ export type BuyerWithAggRow = {
   itemsCount: number;
   itemsTotal: number;
   reservationExpiresAt?: Date;
-  status: BuyerListStatus;
+  status: MasterStatus;
   // ต้องมีอย่างน้อย payment.status (optional)
   payment?: {
     status?: PaymentStatus;
@@ -115,7 +111,8 @@ type StoreOrderItemView = {
 type StoreOrderAgg = {
   _id: Types.ObjectId;
   storeId: Types.ObjectId;
-  status: "pending_payment" | "paid" | "expired" | "canceled";
+  buyerStatus: MasterStatus;
+  storeStatus: StoreStatus;
   pricing?: {
     itemsTotal?: number;
     shippingFee?: number;
@@ -137,7 +134,7 @@ export type BuyerDetailFacet = {
   _id: Types.ObjectId;
   createdAt: Date;
   currency: string;
-  status: "pending_payment" | "paid" | "expired" | "canceled";
+  status: MasterStatus;
   payment?: {
     provider?: string;
     method?: "card" | "promptpay" | "cod";
@@ -162,26 +159,16 @@ export type BuyerDetailFacet = {
 type StoreOrderBriefOut = {
   storeOrderId: string;
   storeId: string;
-  status: StoreOrderAgg["status"];
+  buyerStatus: StoreOrderAgg["buyerStatus"];
   pricing: { itemsTotal: number; grandTotal: number };
   items: StoreOrderItemView[];
 };
-
-type BuyerListStatus =
-  | "pending_payment"
-  | "paying"
-  | "processing"
-  | "paid"
-  | "shipped" // << เพิ่ม
-  | "delivered" // << เพิ่ม
-  | "expired"
-  | "canceled";
 
 export type BuyerOrderDetailItem = {
   masterOrderId: string;
   createdAt: string;
   currency: string;
-  userStatus: BuyerListStatus;
+  buyerStatus: MasterStatus;
   reservationExpiresAt?: string;
   payment?: {
     provider?: string;

@@ -19,6 +19,8 @@ import { PaymentsModule } from "./payments/payments.module";
 import { MessagingModule } from "./messaging/messaging.module";
 import { RealtimeModule } from "./realtime/realtime.module";
 import { ScheduleModule } from "@nestjs/schedule";
+import { WebhooksModule } from "./webhooks/webhooks.module";
+import { WebhooksController } from "./webhooks/webhooks.controller";
 
 @Module({
   imports: [
@@ -41,8 +43,14 @@ import { ScheduleModule } from "@nestjs/schedule";
     PaymentsModule,
     MessagingModule,
     RealtimeModule,
+    WebhooksModule,
   ],
-  controllers: [AppController, OrdersController, PaymentsController],
+  controllers: [
+    AppController,
+    OrdersController,
+    PaymentsController,
+    WebhooksController,
+  ],
   providers: [AppService],
 })
 export class AppModule {}

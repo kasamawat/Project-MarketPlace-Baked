@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -18,6 +20,8 @@ import { UpdateStoreInfoDto } from "./dto/update-store-info.dto";
 import { UpdateStoreBankDto } from "./dto/update-store-bank.dto";
 import { StoreOrdersDto } from "./dto/store-orders.dto";
 import { OrdersService } from "src/orders/orders.service";
+import { PackRequestDto } from "./dto/pack.dto";
+import { ShipRequestDto } from "./dto/ship.dto";
 
 @Controller("store")
 export class StoreController {
@@ -86,5 +90,50 @@ export class StoreController {
     await this.storeService.assertOwner(req.userId, String(req.storeId));
 
     return await this.ordersService.listStoreOrders(q, String(req.storeId));
+  }
+
+  @Get("orders/:storeOrderId")
+  @UseGuards(AuthGuard("jwt"))
+  async getStoreOrderDetail(
+    @Param("storeOrderId") storeOrderId: string,
+    @CurrentUser() req: JwtPayload,
+  ) {
+    // Check user Own this store
+    await this.storeService.assertOwner(req.userId, String(req.storeId));
+
+    return await this.ordersService.getStoreOrderDetail(
+      storeOrderId,
+      String(req.storeId),
+    );
+  }
+
+  @Patch("orders/:storeOrderId/fulfill/pack")
+  @UseGuards(AuthGuard("jwt"))
+  async packStoreOrder(
+    @Param("storeOrderId") storeOrderId: string,
+    @CurrentUser() req: JwtPayload,
+    @Body() dto: PackRequestDto,
+  ) {
+    await this.storeService.assertOwner(req.userId, String(req.storeId));
+    return this.ordersService.packStoreOrder(
+      String(req.storeId),
+      storeOrderId,
+      dto,
+    );
+  }
+
+  @Patch("orders/:storeOrderId/fulfill/ship")
+  @UseGuards(AuthGuard("jwt"))
+  async shipStoreOrder(
+    @Param("storeOrderId") storeOrderId: string,
+    @CurrentUser() req: JwtPayload,
+    @Body() dto: ShipRequestDto,
+  ) {
+    await this.storeService.assertOwner(req.userId, String(req.storeId));
+    return this.ordersService.shipStoreOrder(
+      String(req.storeId),
+      storeOrderId,
+      dto,
+    );
   }
 }

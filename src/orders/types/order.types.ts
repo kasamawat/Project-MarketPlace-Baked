@@ -46,6 +46,7 @@ export type PayMetaOut = {
 };
 
 import { Types } from "mongoose";
+import { MasterStatus } from "../schemas/shared.subdocs";
 
 export type StoreItemPreview = {
   name: string;
@@ -83,15 +84,6 @@ export type StoreFacet = {
   data: StoreDataRow[];
   total: { count: number }[];
 };
-
-/** สถานะที่หน้า Buyer ใช้โชว์ */
-export type BuyerListStatus =
-  | "pending_payment"
-  | "paying"
-  | "processing"
-  | "paid"
-  | "expired"
-  | "canceled";
 
 /** ชิ้นสินค้าสำหรับ preview ใน list */
 export interface PreviewItem {
@@ -132,7 +124,7 @@ export interface BuyerListRow {
   masterOrderId: string;
   createdAt: string; // ISO
   currency: string;
-  status: BuyerListStatus; // mapped จาก master+payment
+  status: MasterStatus; // mapped จาก master+payment
   reservationExpiresAt?: string; // ISO
   itemsPreview: PreviewItem[];
   itemsTotal: number;
@@ -146,13 +138,3 @@ export interface BuyerListOut {
   page: number;
   limit: number;
 }
-
-/* ===== Input types from aggregation ===== */
-export type FulfillStatus =
-  | "AWAITING_PAYMENT"
-  | "PENDING"
-  | "PACKED"
-  | "SHIPPED"
-  | "DELIVERED"
-  | "CANCELED"
-  | "RETURNED";
