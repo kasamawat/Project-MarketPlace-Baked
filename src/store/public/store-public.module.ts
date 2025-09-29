@@ -6,6 +6,11 @@ import { StorePublicController } from "./store-public.controller";
 import { StorePublicService } from "./store-public.service";
 import { Sku, SkuSchema } from "src/skus/schemas/sku-schema";
 import { StoreCommonModule } from "../common/store-common.module";
+import { Image, ImageSchema } from "src/images/schemas/image.schema";
+import {
+  StoreFollow,
+  StoreFollowSchema,
+} from "src/store-follow/schemas/store-follow.schema";
 
 @Module({
   imports: [
@@ -13,6 +18,8 @@ import { StoreCommonModule } from "../common/store-common.module";
       { name: Product.name, schema: ProductSchema },
       { name: Store.name, schema: StoreSchema },
       { name: Sku.name, schema: SkuSchema },
+      { name: Image.name, schema: ImageSchema },
+      { name: StoreFollow.name, schema: StoreFollowSchema },
     ]),
     StoreCommonModule,
   ],

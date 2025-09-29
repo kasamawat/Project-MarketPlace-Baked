@@ -25,7 +25,7 @@ import {
 } from "./utils/orders-helper";
 import { PaymentsService } from "src/payments/payments.service";
 import { UpdateFilter } from "mongodb";
-import { PayMetaOut } from "./types/order.types";
+import { FulfillmentStatus, PayMetaOut } from "./types/order.types";
 import { ListOrdersDto } from "./dto/list-orders.dto";
 import { StoreOrdersDto } from "src/store/dto/store-orders.dto";
 import { StoreOrder, StoreOrderDocument } from "./schemas/store-order.schema";
@@ -60,6 +60,12 @@ import { PackRequestDto } from "src/store/dto/pack.dto";
 import { computeFulfillmentInfo } from "./helper/order-ship-helper";
 import { ShipRequestDto } from "src/store/dto/ship.dto";
 import { StoreOrderModelLean } from "./types/store-order-model";
+import { ReportsResponseDto } from "./dto/order-report.response.dto";
+import { parseRange } from "./helper/order-report-helper";
+import { MQ_PUBLISHER } from "src/messaging/mq.tokens";
+import { MqPublisher } from "src/messaging/mq.types";
+import { PendingEvent } from "src/webhooks/types/webhooks-payment.types";
+import { EXCHANGES } from "src/messaging/mq.topology";
 
 @Injectable()
 export class OrdersService {
@@ -77,6 +83,7 @@ export class OrdersService {
     private readonly inv: InventoryService,
     private readonly pay: PaymentsService, // Assuming you have a PaymentService for handling payments
     private readonly cart: CartService, // Assuming you have a CartService for cart operations
+    @Inject(MQ_PUBLISHER) private readonly mq: MqPublisher,
     @InjectConnection() private readonly conn: Connection,
   ) {}
 
@@ -161,7 +168,7 @@ export class OrdersService {
       grandTotal: itemsTotal,
     };
     const storesCount = byStore.size;
-    const ttlMinutes = 10; // default 20
+    const ttlMinutes = 2; // default 20
     const now = new Date();
 
     const session = await this.conn.startSession();
@@ -325,6 +332,41 @@ export class OrdersService {
           expiresAt: master.reservationExpiresAt,
         };
       });
+
+      // push event
+      try {
+        const pendingEvents: PendingEvent = {
+          exchange: EXCHANGES.ORDERS_EVENTS,
+          routingKey: "orders.created",
+          payload: {
+            eventId: `order:${out.masterOrderId}:created:${idemKey ?? "na"}`,
+            buyerId: userId,
+            masterOrderId: out.masterOrderId,
+            orderNumber: out.masterOrderId, // หรือ orderNumber จริง
+            total: out.amount,
+            occurredAt: new Date().toISOString(),
+            currency: out.currency ?? "THB",
+            paymentMethod: dto.paymentMethod,
+            expiresAt: out.expiresAt,
+          },
+          options: {
+            messageId: `order:${out.masterOrderId}:created:${idemKey ?? "na"}`,
+            persistent: true,
+          },
+        };
+
+        await this.mq.publishTopic(
+          pendingEvents.exchange,
+          pendingEvents.routingKey,
+          pendingEvents.payload,
+          pendingEvents.options,
+        );
+      } catch (pubErr) {
+        // ไม่ควร throw ทับผล checkout (แต่ควรมี alert/monitor)
+        console.log(
+          `orders.created publish failed: ${(pubErr as Error).message}`,
+        );
+      }
 
       return out;
     } finally {
@@ -737,6 +779,7 @@ export class OrdersService {
           let: { mid: "$_id" },
           pipeline: [
             { $match: { $expr: { $eq: ["$masterOrderId", "$$mid"] } } },
+            // pull store
             {
               $lookup: {
                 from: "stores",
@@ -749,6 +792,176 @@ export class OrdersService {
               },
             },
             { $set: { storeDoc: { $first: "$storeDoc" } } },
+            // merge ids for find in images
+            {
+              $set: {
+                _items: { $ifNull: ["$items", []] },
+              },
+            },
+            {
+              $set: {
+                skuIds: {
+                  $map: { input: "$_items", as: "it", in: "$$it.skuId" },
+                },
+                productIds: {
+                  $map: { input: "$_items", as: "it", in: "$$it.productId" },
+                },
+              },
+            },
+            // cover image of sku
+            {
+              $lookup: {
+                from: "images",
+                let: { ids: "$skuIds", sid: "$storeId" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $and: [
+                          { $in: ["$entityId", "$$ids"] },
+                          { $eq: ["$entityType", "sku"] },
+                          { $eq: ["$role", "cover"] },
+                          { $eq: ["$storeId", "$$sid"] },
+                          { $not: ["$deletedAt"] },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      _id: 1,
+                      entityId: 1,
+                      role: 1,
+                      order: 1,
+                      publicId: 1,
+                      version: 1,
+                      width: 1,
+                      height: 1,
+                      format: 1,
+                      url: 1,
+                    },
+                  },
+                ],
+                as: "skuCovers",
+              },
+            },
+            // cover image of product
+            {
+              $lookup: {
+                from: "images",
+                let: { ids: "$productIds", sid: "$storeId" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $and: [
+                          { $in: ["$entityId", "$$ids"] },
+                          { $eq: ["$entityType", "product"] },
+                          { $eq: ["$role", "cover"] },
+                          { $eq: ["$storeId", "$$sid"] },
+                          { $not: ["$deletedAt"] },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      _id: 1,
+                      entityId: 1,
+                      role: 1,
+                      order: 1,
+                      publicId: 1,
+                      version: 1,
+                      width: 1,
+                      height: 1,
+                      format: 1,
+                      url: 1,
+                    },
+                  },
+                ],
+                as: "productCovers",
+              },
+            },
+            // set itemsPreviews
+            {
+              $set: {
+                itemsPreview: {
+                  $slice: [
+                    {
+                      $map: {
+                        input: "$_items",
+                        as: "it",
+                        in: {
+                          name: "$$it.productName",
+                          qty: "$$it.quantity",
+                          image: "$$it.productImage",
+                          attributes: "$$it.attributes",
+                          fulfillStatus: "$$it.fulfillStatus",
+                          cover: {
+                            $let: {
+                              vars: {
+                                iSku: {
+                                  $first: {
+                                    $filter: {
+                                      input: "$skuCovers",
+                                      as: "img",
+                                      cond: {
+                                        $eq: ["$$img.entityId", "$$it.skuId"],
+                                      },
+                                    },
+                                  },
+                                },
+                                iProd: {
+                                  $first: {
+                                    $filter: {
+                                      input: "$productCovers",
+                                      as: "img",
+                                      cond: {
+                                        $eq: [
+                                          "$$img.entityId",
+                                          "$$it.productId",
+                                        ],
+                                      },
+                                    },
+                                  },
+                                },
+                              },
+                              in: {
+                                $ifNull: [
+                                  {
+                                    _id: { $toString: "$$iSku._id" },
+                                    role: "$$iSku.role",
+                                    order: "$$iSku.order",
+                                    publicId: "$$iSku.publicId",
+                                    version: "$$iSku.version",
+                                    width: "$$iSku.width",
+                                    height: "$$iSku.height",
+                                    format: "$$iSku.format",
+                                    url: "$$iSku.url",
+                                  },
+                                  {
+                                    _id: { $toString: "$$iProd._id" },
+                                    role: "$$iProd.role",
+                                    order: "$$iProd.order",
+                                    publicId: "$$iProd.publicId",
+                                    version: "$$iProd.version",
+                                    width: "$$iProd.width",
+                                    height: "$$iProd.height",
+                                    format: "$$iProd.format",
+                                    url: "$$iProd.url",
+                                  },
+                                ],
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    3,
+                  ],
+                },
+              },
+            },
             {
               $project: {
                 _id: 1,
@@ -757,6 +970,7 @@ export class OrdersService {
                 storeStatus: "$status",
                 buyerStatus: "$buyerStatus",
                 items: 1,
+                itemsPreview: 1,
               },
             },
           ],
@@ -817,24 +1031,7 @@ export class OrdersService {
                     },
                   },
                 },
-                itemsPreview: {
-                  $slice: [
-                    {
-                      $map: {
-                        input: { $ifNull: ["$$so.items", []] },
-                        as: "it",
-                        in: {
-                          name: "$$it.productName",
-                          qty: "$$it.quantity",
-                          image: "$$it.productImage",
-                          attributes: "$$it.attributes",
-                          fulfillStatus: "$$it.fulfillStatus",
-                        },
-                      },
-                    },
-                    3,
-                  ],
-                },
+                itemsPreview: { $slice: ["$$so.itemsPreview", 3] },
               },
             },
           },
@@ -857,23 +1054,6 @@ export class OrdersService {
       },
       {
         $addFields: {
-          itemsPreview: {
-            $slice: [
-              {
-                $map: {
-                  input: "$allItems",
-                  as: "it",
-                  in: {
-                    name: "$$it.productName",
-                    qty: "$$it.quantity",
-                    image: "$$it.productImage",
-                    attributes: "$$it.attributes",
-                  },
-                },
-              },
-              3,
-            ],
-          },
           itemsCountCalc: {
             $sum: {
               $map: {
@@ -901,7 +1081,6 @@ export class OrdersService {
           _id: 1,
           createdAt: 1,
           currency: 1,
-          itemsPreview: 1,
           itemsCount: { $ifNull: ["$itemsCount", "$itemsCountCalc"] },
           itemsTotal: { $ifNull: ["$pricing.itemsTotal", "$itemsTotalCalc"] },
           reservationExpiresAt: 1,
@@ -927,7 +1106,6 @@ export class OrdersService {
     const items: BuyerOrderListItem[] = (facet?.data ?? []).map((m) => ({
       masterOrderId: String(m._id),
       createdAt: m.createdAt?.toISOString?.() ?? new Date().toISOString(),
-      itemsPreview: m.itemsPreview ?? [],
       itemsCount: m.itemsCount ?? 0,
       itemsTotal: m.itemsTotal ?? 0,
       currency: m.currency ?? "THB",
@@ -971,6 +1149,175 @@ export class OrdersService {
             },
             {
               $set: { storeStatus: "$status" },
+            },
+            // merge ids for find in images
+            {
+              $set: {
+                _items: { $ifNull: ["$items", []] },
+              },
+            },
+            {
+              $set: {
+                skuIds: {
+                  $map: { input: "$_items", as: "it", in: "$$it.skuId" },
+                },
+                productIds: {
+                  $map: { input: "$_items", as: "it", in: "$$it.productId" },
+                },
+              },
+            },
+            // cover image of sku
+            {
+              $lookup: {
+                from: "images",
+                let: { ids: "$skuIds", sid: "$storeId" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $and: [
+                          { $in: ["$entityId", "$$ids"] },
+                          { $eq: ["$entityType", "sku"] },
+                          { $eq: ["$role", "cover"] },
+                          { $eq: ["$storeId", "$$sid"] },
+                          { $not: ["$deletedAt"] },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      _id: 1,
+                      entityId: 1,
+                      role: 1,
+                      order: 1,
+                      publicId: 1,
+                      version: 1,
+                      width: 1,
+                      height: 1,
+                      format: 1,
+                      url: 1,
+                    },
+                  },
+                ],
+                as: "skuCovers",
+              },
+            },
+            // cover image of product
+            {
+              $lookup: {
+                from: "images",
+                let: { ids: "$productIds", sid: "$storeId" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $and: [
+                          { $in: ["$entityId", "$$ids"] },
+                          { $eq: ["$entityType", "product"] },
+                          { $eq: ["$role", "cover"] },
+                          { $eq: ["$storeId", "$$sid"] },
+                          { $not: ["$deletedAt"] },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      _id: 1,
+                      entityId: 1,
+                      role: 1,
+                      order: 1,
+                      publicId: 1,
+                      version: 1,
+                      width: 1,
+                      height: 1,
+                      format: 1,
+                      url: 1,
+                    },
+                  },
+                ],
+                as: "productCovers",
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                storeId: 1,
+                storeStatus: "$status",
+                pricing: 1,
+                items: {
+                  $map: {
+                    input: "$_items",
+                    as: "it",
+                    in: {
+                      productId: "$$it.productId",
+                      skuId: "$$it.skuId",
+                      productName: "$$it.productName",
+                      productImage: "$$it.productImage",
+                      unitPrice: "$$it.unitPrice",
+                      quantity: "$$it.quantity",
+                      subtotal: "$$it.subtotal",
+                      fulfillStatus: "$$it.fulfillStatus",
+                      attributes: "$$it.attributes",
+                      cover: {
+                        $let: {
+                          vars: {
+                            iSku: {
+                              $first: {
+                                $filter: {
+                                  input: "$skuCovers",
+                                  as: "img",
+                                  cond: {
+                                    $eq: ["$$img.entityId", "$$it.skuId"],
+                                  },
+                                },
+                              },
+                            },
+                            iProd: {
+                              $first: {
+                                $filter: {
+                                  input: "$productCovers",
+                                  as: "img",
+                                  cond: {
+                                    $eq: ["$$img.entityId", "$$it.productId"],
+                                  },
+                                },
+                              },
+                            },
+                          },
+                          in: {
+                            $ifNull: [
+                              {
+                                _id: { $toString: "$$iSku._id" },
+                                role: "$$iSku.role",
+                                order: "$$iSku.order",
+                                publicId: "$$iSku.publicId",
+                                version: "$$iSku.version",
+                                width: "$$iSku.width",
+                                height: "$$iSku.height",
+                                format: "$$iSku.format",
+                                url: "$$iSku.url",
+                              },
+                              {
+                                _id: { $toString: "$$iProd._id" },
+                                role: "$$iProd.role",
+                                order: "$$iProd.order",
+                                publicId: "$$iProd.publicId",
+                                version: "$$iProd.version",
+                                width: "$$iProd.width",
+                                height: "$$iProd.height",
+                                format: "$$iProd.format",
+                                url: "$$iProd.url",
+                              },
+                            ],
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
             },
           ],
           as: "stores",
@@ -1029,6 +1376,7 @@ export class OrdersService {
           subtotal: it.subtotal,
           fulfillStatus: it.fulfillStatus,
           attributes: it.attributes,
+          cover: it.cover,
         })),
       })),
       paidAt: facet.paidAt,
@@ -1066,15 +1414,105 @@ export class OrdersService {
                 },
               },
             },
+            // merge ids for find in images
+            {
+              $set: {
+                _items: { $ifNull: ["$items", []] },
+              },
+            },
+            {
+              $set: {
+                skuIds: {
+                  $map: { input: "$_items", as: "it", in: "$$it.skuId" },
+                },
+                productIds: {
+                  $map: { input: "$_items", as: "it", in: "$$it.productId" },
+                },
+              },
+            },
+            // cover image of sku
+            {
+              $lookup: {
+                from: "images",
+                let: { ids: "$skuIds", sid: "$storeId" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $and: [
+                          { $in: ["$entityId", "$$ids"] },
+                          { $eq: ["$entityType", "sku"] },
+                          { $eq: ["$role", "cover"] },
+                          { $eq: ["$storeId", "$$sid"] },
+                          { $not: ["$deletedAt"] },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      _id: 1,
+                      entityId: 1,
+                      role: 1,
+                      order: 1,
+                      publicId: 1,
+                      version: 1,
+                      width: 1,
+                      height: 1,
+                      format: 1,
+                      url: 1,
+                    },
+                  },
+                ],
+                as: "skuCovers",
+              },
+            },
+            // cover image of product
+            {
+              $lookup: {
+                from: "images",
+                let: { ids: "$productIds", sid: "$storeId" },
+                pipeline: [
+                  {
+                    $match: {
+                      $expr: {
+                        $and: [
+                          { $in: ["$entityId", "$$ids"] },
+                          { $eq: ["$entityType", "product"] },
+                          { $eq: ["$role", "cover"] },
+                          { $eq: ["$storeId", "$$sid"] },
+                          { $not: ["$deletedAt"] },
+                        ],
+                      },
+                    },
+                  },
+                  {
+                    $project: {
+                      _id: 1,
+                      entityId: 1,
+                      role: 1,
+                      order: 1,
+                      publicId: 1,
+                      version: 1,
+                      width: 1,
+                      height: 1,
+                      format: 1,
+                      url: 1,
+                    },
+                  },
+                ],
+                as: "productCovers",
+              },
+            },
             {
               $project: {
                 _id: 1,
                 storeId: 1,
-                status: 1,
+                storeStatus: "$status",
                 pricing: 1,
                 items: {
                   $map: {
-                    input: "$items",
+                    input: "$_items",
                     as: "it",
                     in: {
                       productId: "$$it.productId",
@@ -1086,6 +1524,60 @@ export class OrdersService {
                       subtotal: "$$it.subtotal",
                       fulfillStatus: "$$it.fulfillStatus",
                       attributes: "$$it.attributes",
+                      cover: {
+                        $let: {
+                          vars: {
+                            iSku: {
+                              $first: {
+                                $filter: {
+                                  input: "$skuCovers",
+                                  as: "img",
+                                  cond: {
+                                    $eq: ["$$img.entityId", "$$it.skuId"],
+                                  },
+                                },
+                              },
+                            },
+                            iProd: {
+                              $first: {
+                                $filter: {
+                                  input: "$productCovers",
+                                  as: "img",
+                                  cond: {
+                                    $eq: ["$$img.entityId", "$$it.productId"],
+                                  },
+                                },
+                              },
+                            },
+                          },
+                          in: {
+                            $ifNull: [
+                              {
+                                _id: { $toString: "$$iSku._id" },
+                                role: "$$iSku.role",
+                                order: "$$iSku.order",
+                                publicId: "$$iSku.publicId",
+                                version: "$$iSku.version",
+                                width: "$$iSku.width",
+                                height: "$$iSku.height",
+                                format: "$$iSku.format",
+                                url: "$$iSku.url",
+                              },
+                              {
+                                _id: { $toString: "$$iProd._id" },
+                                role: "$$iProd.role",
+                                order: "$$iProd.order",
+                                publicId: "$$iProd.publicId",
+                                version: "$$iProd.version",
+                                width: "$$iProd.width",
+                                height: "$$iProd.height",
+                                format: "$$iProd.format",
+                                url: "$$iProd.url",
+                              },
+                            ],
+                          },
+                        },
+                      },
                     },
                   },
                 },
@@ -1140,6 +1632,7 @@ export class OrdersService {
         storeOrderId: String(s._id),
         storeId: String(s.storeId),
         buyerStatus: s.buyerStatus,
+        storeStatus: s.storeStatus,
         pricing: {
           itemsTotal: s.pricing?.itemsTotal ?? 0,
           grandTotal: s.pricing?.grandTotal ?? s.pricing?.itemsTotal ?? 0,
@@ -1154,6 +1647,7 @@ export class OrdersService {
           subtotal: it.subtotal,
           fulfillStatus: it.fulfillStatus,
           attributes: it.attributes,
+          cover: it.cover,
         })),
       })),
       paidAt: facet.paidAt,
@@ -1418,44 +1912,6 @@ export class OrdersService {
     }
   }
   // ====================================================================================
-
-  // ================================= Method Claim =================================
-  // ดึง 1 ออเดอร์ที่ “หมดเวลา” แล้ว claim ไว้กันชนกัน
-  // async claimOneExpired(
-  //   now = new Date(),
-  //   workerId = "reaper",
-  // ): Promise<OrderDocument | null> {
-  //   return this.orderModel
-  //     .findOneAndUpdate(
-  //       {
-  //         status: { $in: ["pending_payment", "paying", "processing"] },
-  //         reservationExpiresAt: { $lte: now },
-  //         $or: [
-  //           { expiryClaimedAt: { $exists: false } },
-  //           { expiryClaimedAt: null },
-  //         ],
-  //       },
-  //       { $set: { expiryClaimedAt: now, expiryClaimedBy: workerId } },
-  //       { new: true },
-  //     )
-  //     .lean<OrderDocument>()
-  //     .exec();
-  // }
-
-  // (เผื่อ) ล้าง claim กรณีทำไม่สำเร็จ
-  // async clearClaim(
-  //   masterOrderId: string,
-  //   session?: ClientSession,
-  // ): Promise<void> {
-  //   await this.orderModel
-  //     .updateOne(
-  //       { _id: new Types.ObjectId(masterOrderId) },
-  //       { $unset: { expiryClaimedAt: 1, expiryClaimedBy: 1 } },
-  //       { session },
-  //     )
-  //     .exec();
-  // }
-
   // ================================= Store Order =================================
   /** รายการออเดอร์ของ “ร้าน” (อ่านจาก StoreOrder โดยตรง) */
   async listStoreOrders(
@@ -1507,6 +1963,7 @@ export class OrdersService {
 
       // Buyer info
       {
+        // find buyer
         $lookup: {
           from: "users",
           let: { uid: "$buyerId" },
@@ -1518,7 +1975,96 @@ export class OrdersService {
         },
       },
       { $set: { buyer: { $first: "$buyer" } } },
-
+      // merge ids for find in images
+      {
+        $set: {
+          _items: { $ifNull: ["$items", []] },
+        },
+      },
+      {
+        $set: {
+          skuIds: {
+            $map: { input: "$_items", as: "it", in: "$$it.skuId" },
+          },
+          productIds: {
+            $map: { input: "$_items", as: "it", in: "$$it.productId" },
+          },
+        },
+      },
+      // cover image of sku
+      {
+        $lookup: {
+          from: "images",
+          let: { ids: "$skuIds", sid: "$storeId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$entityId", "$$ids"] },
+                    { $eq: ["$entityType", "sku"] },
+                    { $eq: ["$role", "cover"] },
+                    { $eq: ["$storeId", "$$sid"] },
+                    { $not: ["$deletedAt"] },
+                  ],
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                entityId: 1,
+                role: 1,
+                order: 1,
+                publicId: 1,
+                version: 1,
+                width: 1,
+                height: 1,
+                format: 1,
+                url: 1,
+              },
+            },
+          ],
+          as: "skuCovers",
+        },
+      },
+      // cover image of product
+      {
+        $lookup: {
+          from: "images",
+          let: { ids: "$productIds", sid: "$storeId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$entityId", "$$ids"] },
+                    { $eq: ["$entityType", "product"] },
+                    { $eq: ["$role", "cover"] },
+                    { $eq: ["$storeId", "$$sid"] },
+                    { $not: ["$deletedAt"] },
+                  ],
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                entityId: 1,
+                role: 1,
+                order: 1,
+                publicId: 1,
+                version: 1,
+                width: 1,
+                height: 1,
+                format: 1,
+                url: 1,
+              },
+            },
+          ],
+          as: "productCovers",
+        },
+      },
       // คำนวณ summary/preview จาก items ทั้งหมด (ไม่ต้อง filter แล้ว)
       {
         $addFields: {
@@ -1544,17 +2090,71 @@ export class OrdersService {
             $slice: [
               {
                 $map: {
-                  input: { $ifNull: ["$items", []] },
+                  input: "$_items",
                   as: "it",
                   in: {
                     name: "$$it.productName",
                     qty: "$$it.quantity",
                     attributes: "$$it.attributes",
                     fulfillStatus: "$$it.fulfillStatus",
+                    cover: {
+                      $let: {
+                        vars: {
+                          iSku: {
+                            $first: {
+                              $filter: {
+                                input: "$skuCovers",
+                                as: "img",
+                                cond: {
+                                  $eq: ["$$img.entityId", "$$it.skuId"],
+                                },
+                              },
+                            },
+                          },
+                          iProd: {
+                            $first: {
+                              $filter: {
+                                input: "$productCovers",
+                                as: "img",
+                                cond: {
+                                  $eq: ["$$img.entityId", "$$it.productId"],
+                                },
+                              },
+                            },
+                          },
+                        },
+                        in: {
+                          $ifNull: [
+                            {
+                              _id: { $toString: "$$iSku._id" },
+                              role: "$$iSku.role",
+                              order: "$$iSku.order",
+                              publicId: "$$iSku.publicId",
+                              version: "$$iSku.version",
+                              width: "$$iSku.width",
+                              height: "$$iSku.height",
+                              format: "$$iSku.format",
+                              url: "$$iSku.url",
+                            },
+                            {
+                              _id: { $toString: "$$iProd._id" },
+                              role: "$$iProd.role",
+                              order: "$$iProd.order",
+                              publicId: "$$iProd.publicId",
+                              version: "$$iProd.version",
+                              width: "$$iProd.width",
+                              height: "$$iProd.height",
+                              format: "$$iProd.format",
+                              url: "$$iProd.url",
+                            },
+                          ],
+                        },
+                      },
+                    },
                   },
                 },
               },
-              2,
+              3,
             ],
           },
         },
@@ -1607,6 +2207,60 @@ export class OrdersService {
     return { items, total };
   }
 
+  async getStoreOrder(storeId: string) {
+    if (!Types.ObjectId.isValid(storeId)) {
+      throw new BadRequestException("Invalid storeId"); // ✅ แก้ข้อความ
+    }
+    const storeIdObj = new Types.ObjectId(storeId);
+
+    const pipeline: PipelineStage[] = [
+      {
+        $match: {
+          storeId: storeIdObj,
+          status: { $nin: ["CANCELED", "EXPIRED", "REFUNDED"] },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          ordersCount: { $sum: 1 },
+          orderSucc: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "DELIVERED"] }, 1, 0],
+            },
+          },
+          totalEarn: {
+            $sum: {
+              $cond: [
+                { $eq: ["$status", "DELIVERED"] },
+                "$pricing.itemsTotal",
+                0,
+              ],
+            },
+          },
+        },
+      },
+      { $project: { _id: 0, ordersCount: 1, orderSucc: 1, totalEarn: 1 } },
+    ];
+
+    const [storeOrders] = await this.storeOrderModel
+      .aggregate<{
+        ordersCount: number;
+        orderSucc: number;
+        totalEarn: number;
+      }>(pipeline)
+      .exec();
+
+    // ✅ กันเคสไม่มีออเดอร์
+    return (
+      storeOrders ?? {
+        ordersCount: 0,
+        orderSucc: 0,
+        totalEarn: 0,
+      }
+    );
+  }
+
   async getStoreOrderDetail(
     storeOrderId: string,
     storeId: string,
@@ -1640,7 +2294,96 @@ export class OrdersService {
         },
       },
       { $set: { buyer: { $first: "$buyer" } } },
-
+      // merge ids for find in images
+      {
+        $set: {
+          _items: { $ifNull: ["$items", []] },
+        },
+      },
+      {
+        $set: {
+          skuIds: {
+            $map: { input: "$_items", as: "it", in: "$$it.skuId" },
+          },
+          productIds: {
+            $map: { input: "$_items", as: "it", in: "$$it.productId" },
+          },
+        },
+      },
+      // cover image of sku
+      {
+        $lookup: {
+          from: "images",
+          let: { ids: "$skuIds", sid: "$storeId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$entityId", "$$ids"] },
+                    { $eq: ["$entityType", "sku"] },
+                    { $eq: ["$role", "cover"] },
+                    { $eq: ["$storeId", "$$sid"] },
+                    { $not: ["$deletedAt"] },
+                  ],
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                entityId: 1,
+                role: 1,
+                order: 1,
+                publicId: 1,
+                version: 1,
+                width: 1,
+                height: 1,
+                format: 1,
+                url: 1,
+              },
+            },
+          ],
+          as: "skuCovers",
+        },
+      },
+      // cover image of product
+      {
+        $lookup: {
+          from: "images",
+          let: { ids: "$productIds", sid: "$storeId" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $in: ["$entityId", "$$ids"] },
+                    { $eq: ["$entityType", "product"] },
+                    { $eq: ["$role", "cover"] },
+                    { $eq: ["$storeId", "$$sid"] },
+                    { $not: ["$deletedAt"] },
+                  ],
+                },
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                entityId: 1,
+                role: 1,
+                order: 1,
+                publicId: 1,
+                version: 1,
+                width: 1,
+                height: 1,
+                format: 1,
+                url: 1,
+              },
+            },
+          ],
+          as: "productCovers",
+        },
+      },
       // join master order
       {
         $lookup: {
@@ -1674,7 +2417,7 @@ export class OrdersService {
           },
           itemsPreview: {
             $map: {
-              input: "$items",
+              input: "$_items",
               as: "it",
               in: {
                 productId: "$$it.productId",
@@ -1689,6 +2432,60 @@ export class OrdersService {
                 deliveredQty: "$$it.deliveredQty",
                 canceledQty: "$$it.canceledQty",
                 fulfillStatus: "$$it.fulfillStatus",
+                cover: {
+                  $let: {
+                    vars: {
+                      iSku: {
+                        $first: {
+                          $filter: {
+                            input: "$skuCovers",
+                            as: "img",
+                            cond: {
+                              $eq: ["$$img.entityId", "$$it.skuId"],
+                            },
+                          },
+                        },
+                      },
+                      iProd: {
+                        $first: {
+                          $filter: {
+                            input: "$productCovers",
+                            as: "img",
+                            cond: {
+                              $eq: ["$$img.entityId", "$$it.productId"],
+                            },
+                          },
+                        },
+                      },
+                    },
+                    in: {
+                      $ifNull: [
+                        {
+                          _id: { $toString: "$$iSku._id" },
+                          role: "$$iSku.role",
+                          order: "$$iSku.order",
+                          publicId: "$$iSku.publicId",
+                          version: "$$iSku.version",
+                          width: "$$iSku.width",
+                          height: "$$iSku.height",
+                          format: "$$iSku.format",
+                          url: "$$iSku.url",
+                        },
+                        {
+                          _id: { $toString: "$$iProd._id" },
+                          role: "$$iProd.role",
+                          order: "$$iProd.order",
+                          publicId: "$$iProd.publicId",
+                          version: "$$iProd.version",
+                          width: "$$iProd.width",
+                          height: "$$iProd.height",
+                          format: "$$iProd.format",
+                          url: "$$iProd.url",
+                        },
+                      ],
+                    },
+                  },
+                },
               },
             },
           },
@@ -1940,6 +2737,174 @@ export class OrdersService {
     return this.getStoreOrderDetail(storeOrderId, storeId);
   }
 
+  async packDelete(storeId: string, storeOrderId: string, packageId: string) {
+    const storeIdObj = new Types.ObjectId(storeId);
+    const storeOrderIdObj = new Types.ObjectId(storeOrderId);
+    const packageIdObj = new Types.ObjectId(packageId);
+
+    const session = await this.conn.startSession();
+    try {
+      await session.withTransaction(async () => {
+        // 1) โหลดออเดอร์
+        const order = await this.storeOrderModel
+          .findOne({ _id: storeOrderIdObj, storeId: storeIdObj })
+          .lean<StoreOrderModelLean>()
+          .session(session);
+
+        if (!order) throw new NotFoundException("Store order not found");
+
+        // หา package ตาม id
+        const pkg = order.fulfillment?.packages?.find(
+          (p) => String(p._id) === String(packageIdObj),
+        );
+        if (!pkg) throw new NotFoundException("Package not found");
+
+        // 2) ป้องกันเคสลบกล่องที่ถูกใช้งานใน shipment แล้ว
+        const usedByShipment = (order.fulfillment?.shipments ?? []).some(
+          (sh) =>
+            Array.isArray(sh.packageIds) &&
+            sh.packageIds.some((id) => String(id) === String(packageIdObj)),
+        );
+        if (usedByShipment) {
+          throw new ForbiddenException(
+            "This package is already used by a shipment",
+          );
+        }
+
+        // 3) รวมยอดที่จะย้อนกลับต่อ SKU (productId+skuId)
+        const toReverse = new Map<string, number>(); // key -> qty
+        for (const it of pkg.items ?? []) {
+          const key = `${String(it.productId)}::${String(it.skuId)}`;
+          toReverse.set(key, (toReverse.get(key) ?? 0) + (it.qty ?? 0));
+        }
+
+        // ตรวจความถูกต้อง: ห้ามย้อนเกิน packed / shipped
+        for (const [key, qty] of toReverse.entries()) {
+          const [pid, sid] = key.split("::");
+          const row = order.items.find(
+            (r) => String(r.productId) === pid && String(r.skuId) === sid,
+          );
+          if (!row) throw new BadRequestException(`Item not found: ${key}`);
+
+          const packed = row.packedQty ?? 0;
+          const shipped = row.shippedQty ?? 0;
+          if (qty <= 0)
+            throw new BadRequestException(`Invalid qty to un-pack for ${key}`);
+          // อย่างน้อยต้องเหลือ packed >= shipped หลังย้อน
+          if (packed - qty < shipped) {
+            throw new BadRequestException(
+              `Cannot delete this package: shipped(${shipped}) would exceed packed(${packed - qty}) for ${key}`,
+            );
+          }
+        }
+
+        // 4) สร้าง $inc (ติดลบ) + arrayFilters สำหรับ items
+        const decMap: Record<string, number> = {};
+        const filters: any[] = [];
+        let i = 0;
+        for (const [key, qty] of toReverse.entries()) {
+          const [pid, sid] = key.split("::");
+          decMap[`items.$[it${i}].packedQty`] = -qty;
+          filters.push({
+            [`it${i}.productId`]: new Types.ObjectId(pid),
+            [`it${i}.skuId`]: new Types.ObjectId(sid),
+          });
+          i++;
+        }
+
+        // 5) อัปเดตรอบแรก: pull package + ลด packedQty + เพิ่ม timeline "unpacked"
+        const now = new Date();
+        await this.storeOrderModel.updateOne(
+          { _id: storeOrderIdObj, storeId: storeIdObj },
+          {
+            $pull: { "fulfillment.packages": { _id: packageIdObj } },
+            $inc: decMap,
+            $push: {
+              "fulfillment.timeline": {
+                type: "store.unpacked",
+                at: now,
+                by: "Store",
+                payload: { packageId: packageIdObj },
+              },
+            },
+          },
+          { arrayFilters: filters, session },
+        );
+
+        // 6) โหลดกลับมาเพื่อรีคอมพิวต์สถานะ
+        const updated = await this.storeOrderModel
+          .findOne({ _id: storeOrderIdObj })
+          .session(session);
+        if (!updated)
+          throw new NotFoundException("Store order not found after update");
+
+        // sync fulfillStatus per item (+ บันทึก timeline ของ item)
+        updated.items = updated.items.map((it) => {
+          const status = computeItemStatus(
+            it.quantity,
+            it.packedQty ?? 0,
+            it.shippedQty ?? 0,
+            it.deliveredQty ?? 0,
+            it.canceledQty ?? 0,
+          );
+          it.fulfillTimeline = it.fulfillTimeline ?? [];
+          it.fulfillTimeline.push({
+            type: "store.unpacked",
+            by: "Store",
+            at: now,
+          });
+          if (it.fulfillStatus !== status) it.fulfillStatus = status;
+          return it;
+        });
+
+        // คำนวณสรุป fulfillment & อัปเดตสถานะร้าน
+        const summary = computeFulfillmentInfo(
+          updated.items.map((x) => ({
+            quantity: x.quantity,
+            shippedQty: x.shippedQty,
+            deliveredQty: x.deliveredQty,
+            canceledQty: x.canceledQty,
+          })),
+          updated.fulfillment,
+        );
+        updated.fulfillment = {
+          ...summary,
+          packages: summary.packages,
+          shipments: summary.shipments,
+          timeline: summary.timeline,
+        };
+
+        const allQty = updated.items.reduce((s, x) => s + x.quantity, 0);
+        const deliveredQty = updated.items.reduce(
+          (s, x) => s + (x.deliveredQty ?? 0),
+          0,
+        );
+        const shippedQty = updated.items.reduce(
+          (s, x) => s + (x.shippedQty ?? 0),
+          0,
+        );
+        const packedQty = updated.items.reduce(
+          (s, x) => s + (x.packedQty ?? 0),
+          0,
+        );
+
+        let newStoreStatus = updated.status;
+        if (deliveredQty >= allQty) newStoreStatus = "DELIVERED";
+        else if (shippedQty >= allQty) newStoreStatus = "SHIPPED";
+        else if (packedQty > 0) newStoreStatus = "PACKED";
+        else newStoreStatus = "PENDING";
+
+        updated.status = newStoreStatus;
+        await updated.save({ session });
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    // ส่งกลับรายละเอียดล่าสุดเหมือน packStoreOrder
+    return this.getStoreOrderDetail(storeOrderId, storeId);
+  }
+
   async shipStoreOrder(
     storeId: string,
     storeOrderId: string,
@@ -2181,9 +3146,227 @@ export class OrdersService {
         await updated.save({ session });
       });
 
+      // 6.x หลัง TX สำเร็จค่อย publish event (อยู่นอก withTransaction)
+      try {
+        // สร้าง payload ให้ครบถ้วน และ idempotent ด้วย newShipmentId
+        const ev = {
+          eventId: `order:${String(order.masterOrderId)}:store:${storeOrderId}:shipment:${String(newShipmentId)}:shipped`,
+          occurredAt: new Date().toISOString(),
+          buyerId: String(order.buyerId),
+          masterOrderId: String(order.masterOrderId),
+          storeOrderId: storeOrderId,
+          storeId: storeId,
+          shipment: {
+            shipmentId: String(newShipmentId),
+            carrier: dto.shipment.carrier,
+            trackingNumber: dto.shipment.trackingNumber,
+            method: dto.shipment.method,
+            shippedAt: shippedAtISO.toISOString(),
+            packageIds: ids.map(String),
+            note: dto.shipment.note,
+          },
+        };
+
+        await this.mq.publishTopic(
+          EXCHANGES.ORDERS_EVENTS,
+          "orders.shipped",
+          ev,
+          {
+            messageId: ev.eventId, // idempotent
+            persistent: true,
+          },
+        );
+      } catch (pubErr) {
+        // ไม่ throw ทับผล ship; แค่ log/monitor
+        console.log(
+          `orders.shipped publish failed: ${(pubErr as Error).message}`,
+        );
+      }
+
       return this.getStoreOrderDetail(storeOrderId, storeId);
     } finally {
       await session.endSession();
     }
+  }
+
+  async getReports(
+    storeId: string,
+    range?: { from?: string; to?: string },
+  ): Promise<ReportsResponseDto> {
+    if (!Types.ObjectId.isValid(storeId)) {
+      throw new BadRequestException("Invalid storeId");
+    }
+    const storeIdObj = new Types.ObjectId(storeId);
+    const { start, end } = parseRange(range ?? {});
+
+    // ------- Pipeline ส่วน Summary (รายได้/ออเดอร์/AOV) --------
+    const summaryPipe: PipelineStage[] = [
+      {
+        $match: {
+          storeId: storeIdObj,
+          buyerStatus: "paid", // นับเฉพาะ paid
+          deliveredAt: { $gte: start, $lte: end },
+          "items.fulfillStatus": "DELIVERED",
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          // ถ้าฝั่งคุณใช้ pricing.grandTotal เป็นยอดรวมของร้านนั้น ใช้อันนี้:
+          revenue: { $sum: { $ifNull: ["$pricing.grandTotal", 0] } },
+          orders: { $sum: 1 },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          revenue: 1,
+          orders: 1,
+          aov: {
+            $cond: [
+              { $gt: ["$orders", 0] },
+              { $divide: ["$revenue", "$orders"] },
+              0,
+            ],
+          },
+        },
+      },
+    ];
+
+    // ------- Pipeline ส่วน Top Products --------
+    const topProductsPipe: PipelineStage[] = [
+      {
+        $match: {
+          storeId: storeIdObj,
+          buyerStatus: "paid",
+          deliveredAt: { $gte: start, $lte: end },
+          "items.fulfillStatus": "DELIVERED",
+        },
+      },
+      { $unwind: "$items" },
+      {
+        $addFields: {
+          // 1) packages ที่มี SKU นี้
+          _pkgsForItem: {
+            $filter: {
+              input: { $ifNull: ["$fulfillment.packages", []] },
+              as: "p",
+              cond: {
+                $gt: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: { $ifNull: ["$$p.items", []] },
+                        as: "pi",
+                        cond: { $eq: ["$$pi.skuId", "$items.skuId"] }, // *** ต้องให้ชนิดตรงกัน (ObjectId)
+                      },
+                    },
+                  },
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      },
+      {
+        $addFields: {
+          // pull all shipmentId of packages is have this SKU
+          _shipmentIdsForItem: {
+            $setUnion: {
+              $map: { input: "$_pkgsForItem", as: "pp", in: "$$pp.shipmentId" },
+            },
+          },
+        },
+      },
+      {
+        $addFields: {
+          // find deliveredAt from shipments at id
+          deliveredAtForItem: {
+            $max: {
+              $map: {
+                input: {
+                  $filter: {
+                    input: { $ifNull: ["$fulfillment.shipments", []] },
+                    as: "s",
+                    cond: {
+                      $and: [
+                        { $in: ["$$s._id", "$_shipmentIdsForItem"] },
+                        { $ne: ["$$s.deliveredAt", null] },
+                      ],
+                    },
+                  },
+                },
+                as: "s2",
+                in: "$$s2.deliveredAt",
+              },
+            },
+          },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          productId: { $toString: "$items.productId" },
+          skuId: { $toString: "$items.skuId" },
+          name: "$items.productName",
+          attributes: "$items.attributes",
+          fulfillStatus: "$items.fulfillStatus",
+          qty: "$items.quantity",
+          revenue: {
+            $ifNull: [
+              "$items.subtotal",
+              {
+                $multiply: [
+                  { $ifNull: ["$items.quantity", 0] },
+                  { $ifNull: ["$items.unitPrice", 0] },
+                ],
+              },
+            ],
+          },
+          deliveredAt: "$deliveredAtForItem",
+        },
+      },
+    ];
+
+    // ยิง 2 pipeline พร้อมกัน
+    const [summaryAgg, topAgg] = await Promise.all([
+      this.storeOrderModel
+        .aggregate<{
+          revenue: number;
+          orders: number;
+          aov: number;
+        }>(summaryPipe)
+        .exec(),
+      this.storeOrderModel
+        .aggregate<{
+          productId: string;
+          skuId: string;
+          name: string;
+          attributes: Record<string, string>;
+          fulfillStatus: FulfillmentStatus;
+          qty: number;
+          revenue: number;
+          deliveredAt: Date;
+        }>(topProductsPipe)
+        .exec(),
+    ]);
+
+    const summary = summaryAgg?.[0] ?? { revenue: 0, orders: 0, aov: 0 };
+    const topProducts =
+      topAgg.map((p) => ({
+        ...p,
+        deliveredAt: p.deliveredAt?.toISOString(),
+      })) ?? [];
+    console.log(topProducts, "topProducts");
+
+    return {
+      summary: {
+        revenue: Number(summary.revenue || 0),
+        orders: Number(summary.orders || 0),
+        aov: Number(summary.aov || 0),
+      },
+      topProducts,
+    };
   }
 }

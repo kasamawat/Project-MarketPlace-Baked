@@ -5,14 +5,22 @@ import { MongooseModule } from "@nestjs/mongoose";
 import { Store, StoreSchema } from "./schemas/store.schema";
 import { Product, ProductSchema } from "src/products/schemas/product.schema";
 import { OrdersModule } from "src/orders/orders.module";
+import { Image, ImageSchema } from "src/images/schemas/image.schema";
+import { ImagesModule } from "src/images/images.module";
+import { OutboxModule } from "src/outbox/outbox.module";
+import { CloudinaryModule } from "src/uploads/uploads.module";
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: Product.name, schema: ProductSchema },
       { name: Store.name, schema: StoreSchema },
+      { name: Image.name, schema: ImageSchema },
     ]),
     OrdersModule,
+    CloudinaryModule,
+    ImagesModule,
+    OutboxModule,
   ],
   controllers: [StoreController],
   providers: [StoreService],

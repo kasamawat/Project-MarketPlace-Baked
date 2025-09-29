@@ -65,6 +65,10 @@ export class StoreOrderItem {
 
   @Prop({ type: [FulfillTimelineItem], default: [] })
   fulfillTimeline!: FulfillTimelineItem[];
+
+  @Prop({ default: false }) reviewed!: boolean;
+  @Prop({ type: Types.ObjectId }) reviewId?: Types.ObjectId;
+  @Prop() reviewedAt?: Date;
 }
 export const StoreOrderItemSchema =
   SchemaFactory.createForClass(StoreOrderItem);

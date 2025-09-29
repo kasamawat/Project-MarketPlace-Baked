@@ -1,5 +1,12 @@
 import { PlaceOrderDto } from "../dto/place-order.dto";
 
+export type FulfillmentStatus =
+  | "PENDING"
+  | "PACKED"
+  | "SHIPPED"
+  | "DELIVERED"
+  | "CANCELED";
+
 export type Args = {
   dto: PlaceOrderDto;
   userId: string;

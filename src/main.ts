@@ -9,12 +9,11 @@ async function bootstrap() {
 
   app.use(cookieParser());
   app.enableCors({
-    origin: "http://localhost:3000",
+    origin: ["http://localhost:2999", "http://localhost:3000"],
     credentials: true,
   });
 
   // 1) เส้นทาง Webhook: ต้องเป็น RAW BUFFER เท่านั้น
-  // app.use("/payments/webhook", bodyParser.raw({ type: "application/json" }));
   app.use("/webhooks/payment", bodyParser.raw({ type: "application/json" }));
   app.use(
     "/webhooks/carriers/:carrierCode",

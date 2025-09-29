@@ -14,6 +14,18 @@ function toStringRecord(v: unknown): Record<string, string> {
   return {};
 }
 
+type ImageItemDto = {
+  _id: string;
+  role: "cover" | "gallery";
+  order: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string; // ถ้าเก็บไว้
+};
+
 export type SkuLeanRaw = {
   _id: Types.ObjectId;
   skuCode?: string;
@@ -72,4 +84,12 @@ export class SkuResponseDto {
   @ApiProperty({ default: 0 }) @Expose() onHand!: number;
   @ApiProperty({ default: 0 }) @Expose() reserved!: number;
   @ApiProperty({ default: 0 }) @Expose() available!: number;
+
+  @ApiProperty()
+  @Expose()
+  cover?: ImageItemDto;
+
+  @ApiProperty()
+  @Expose()
+  images?: ImageItemDto[];
 }

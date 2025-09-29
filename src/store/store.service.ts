@@ -15,6 +15,12 @@ import { Product, ProductDocument } from "src/products/schemas/product.schema";
 import { UpdateStoreInfoDto } from "./dto/update-store-info.dto";
 import { toSlug } from "./utils/store-function";
 import { UpdateStoreBankDto } from "./dto/update-store-bank.dto";
+import { ImageEntityType, ImageRole } from "src/images/image.enums";
+import { ImagesService } from "src/images/images.service";
+import { OutboxService } from "src/outbox/outbox.service";
+import { CloudinaryService } from "src/uploads/uploads.service";
+import { Image, ImageDocument } from "src/images/schemas/image.schema";
+import { ImagesLeanRaw } from "src/products/dto/response-product.dto";
 
 @Injectable()
 export class StoreService {
@@ -23,6 +29,12 @@ export class StoreService {
     private readonly storeModel: Model<StoreDocument>,
     @InjectModel(Product.name)
     private readonly productModel: Model<ProductDocument>,
+    @InjectModel(Image.name)
+    private readonly imageModel: Model<ImageDocument>,
+
+    private readonly cloud: CloudinaryService,
+    private readonly imagesService: ImagesService,
+    private readonly outboxService: OutboxService,
   ) {}
 
   async createStore(dto: CreateStoreDto, payload: JwtPayload) {
@@ -55,25 +67,61 @@ export class StoreService {
 
     const store = await this.storeModel
       .findOne({ ownerId: userId })
-      .select("name status slug") // เพิ่ม slug ถ้า frontend ใช้ redirect ไป /stores/[slug]
+      .select("_id name status slug") // เพิ่ม slug ถ้า frontend ใช้ redirect ไป /stores/[slug]
       .lean();
 
     return store;
   }
 
   async getStoreSecure(payload: JwtPayload): Promise<StoreInfoDto | null> {
-    const store = await this.storeModel
-      .findOne({ ownerId: payload.userId })
-      .lean();
+    const storeIdObj = new Types.ObjectId(String(payload.storeId));
+
+    const [store, logoDoc] = await Promise.all([
+      this.storeModel.findOne({ ownerId: payload.userId }).lean(),
+      this.imageModel
+        .findOne({
+          entityType: ImageEntityType.Store,
+          entityId: storeIdObj,
+          role: ImageRole.Logo,
+          storeId: storeIdObj,
+        })
+        .select(
+          "_id role order publicId version width height format url createdAt",
+        )
+        .lean<ImagesLeanRaw>()
+        .exec(),
+    ]);
 
     if (!store) return null;
 
-    return plainToInstance(StoreInfoDto, store, {
+    const dto = plainToInstance(StoreInfoDto, store, {
       excludeExtraneousValues: true,
     });
+
+    if (logoDoc?.url) dto.logoUrl = logoDoc.url;
+
+    if (logoDoc) {
+      dto.logo = {
+        _id: String(logoDoc._id),
+        role: logoDoc.role,
+        order: logoDoc.order,
+        publicId: logoDoc.publicId,
+        version: logoDoc.version,
+        width: logoDoc.width,
+        height: logoDoc.height,
+        format: logoDoc.format,
+        url: logoDoc.url,
+      };
+    }
+
+    return dto;
   }
 
-  async updateStoreInfo(dto: UpdateStoreInfoDto, payload: JwtPayload) {
+  async updateStoreInfo(
+    dto: UpdateStoreInfoDto,
+    payload: JwtPayload,
+    logo?: Express.Multer.File,
+  ) {
     const storeId = new Types.ObjectId(payload.storeId);
 
     const update: Record<string, any> = {};
@@ -102,8 +150,54 @@ export class StoreService {
 
     if (!updated) throw new NotFoundException("Store not found");
 
+    if (logo) {
+      const prevPublicId = `stores/${String(payload.storeId)}/logo`;
+
+      // 1) upload -> temp
+      const temp = await this.cloud.uploadTempImage(
+        logo.buffer,
+        String(payload.storeId),
+      );
+
+      // 2) rename temp -> final (ทับของเดิมด้วย public_id เดิม)
+      await this.cloud.rename(temp.public_id, prevPublicId);
+
+      // 3) final URL พร้อม version ใหม่
+      const finalUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/f_auto,q_auto/v${temp.version}/${prevPublicId}`;
+
+      // 4) อัปเดต images table (ลบ metadata เก่า role:Logo ทิ้ง แล้ว attach ใหม่)
+      await this.imagesService
+        .detachByEntityRole(
+          ImageEntityType.Store,
+          String(payload.storeId),
+          ImageRole.Logo,
+          payload,
+          { deleteOnCloud: false },
+        )
+        .catch(() => {});
+
+      await this.imagesService.attach(
+        {
+          entityType: ImageEntityType.Store,
+          entityId: String(payload.storeId),
+          storeId: String(payload.storeId),
+          role: ImageRole.Logo,
+          publicId: prevPublicId,
+          url: finalUrl,
+          version: temp.version,
+          width: temp.width,
+          height: temp.height,
+          format: temp.format,
+          bytes: temp.bytes,
+        },
+        payload,
+      );
+
+      return { ...updated, ok: true };
+    }
+
     // ถ้ามีฟิลด์ที่ไม่ควรส่งกลับ (เช่น secret) ให้ลบออกก่อน
-    return updated;
+    return { ...updated, ok: true };
   }
 
   async updateStoreBank(dto: UpdateStoreBankDto, playload: JwtPayload) {

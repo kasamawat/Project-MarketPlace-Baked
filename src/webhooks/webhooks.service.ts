@@ -36,6 +36,10 @@ import {
   PaymentWebhookEventDocument,
 } from "./schemas/payment-webhook-event.schema";
 import { PendingEvent } from "./types/webhooks-payment.types";
+import {
+  MasterOrder,
+  MasterOrderDocument,
+} from "src/orders/schemas/master-order.schema";
 
 @Injectable()
 export class WebhooksService {
@@ -44,6 +48,9 @@ export class WebhooksService {
   constructor(
     @Inject(STRIPE_CLIENT) private readonly stripe: Stripe,
     @InjectConnection() private readonly conn: Connection,
+
+    @InjectModel(MasterOrder.name)
+    private readonly masterOrderModel: Model<MasterOrderDocument>,
     @InjectModel(StoreOrder.name)
     private readonly storeOrderModel: Model<StoreOrderDocument>,
 
@@ -228,6 +235,17 @@ export class WebhooksService {
             // Clear Cart After Paid
             await this.orders.finalizeCartAfterPaid(masterOrderId, session);
 
+            let buyerId = pi.metadata?.buyerId as string | undefined;
+            if (!pi.metadata.buyerId && masterOrderId) {
+              const mo = await this.masterOrderModel
+                .findById(new Types.ObjectId(masterOrderId))
+                .select({ buyerId: 1 })
+                .lean()
+                .exec();
+
+              buyerId = mo?.buyerId ? String(mo.buyerId) : undefined;
+            }
+
             pendingEvents.push(
               //1) payment event
               {
@@ -244,23 +262,26 @@ export class WebhooksService {
                   persistent: true,
                 },
               },
-              // 2) domain order event
+              // 2) noti orders event paid
               {
                 exchange: EXCHANGES.ORDERS_EVENTS,
-                routingKey: "orders.master.paid",
+                routingKey: "orders.paid",
                 payload: {
-                  masterOrderId,
-                  paymentIntentId: pi.id,
-                  chargeId,
-                  amount:
+                  eventId: `order:${masterOrderId}:paid:${pi.id}`,
+                  buyerId: buyerId,
+                  masterOrderId: pi.metadata.masterOrderId,
+                  orderNumber: pi.metadata.masterOrderId, // หรือ orderNumber จริง
+                  total:
                     typeof pi.amount_received === "number"
                       ? pi.amount_received / 100
                       : (pi.amount ?? 0) / 100,
-                  currency: (pi.currency ?? "thb").toUpperCase(),
-                  at: new Date().toISOString(),
+                  occurredAt: new Date().toISOString(),
+                  currency: pi.currency ?? "THB",
+                  paymentMethod: pi.metadata.paymentMethod,
+                  // expiresAt: ,
                 },
                 options: {
-                  messageId: `master:${masterOrderId}:paid:${Date.now()}`,
+                  messageId: `order:${masterOrderId}:paid:${pi.id}`,
                   persistent: true,
                 },
               },
@@ -361,15 +382,15 @@ export class WebhooksService {
     // ตรวจ timestamp สั้น ๆ
     const now = Date.now();
     const t = Number(ts) || Date.parse(ts);
-    const test = Date.now() + t;
-    // if (!t || Math.abs(now - t) > 5 * 60 * 1000) return false;
-    if (!t || Math.abs(now - test) > 5 * 60 * 1000) return false;
+    // const test = Date.now() + t;
+    if (!t || Math.abs(now - t) > 5 * 60 * 1000) return false;
+    // if (!t || Math.abs(now - test) > 5 * 60 * 1000) return false;
 
     const h = crypto
       .createHmac("sha256", secret)
-      .update(rawBody + ts)
-      .digest("hex");
-    console.log(h,"H");
+      .update(rawBody + ts, "utf-8")
+      .digest("base64");
+    console.log(h, "H");
     return crypto.timingSafeEqual(Buffer.from(h), Buffer.from(sig));
   }
 
@@ -395,7 +416,7 @@ export class WebhooksService {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       if (e?.code === 11000) {
         // duplicate eventId → ถือว่าสำเร็จไปแล้ว
-        return;
+        return { ok: true, message: "Duplicate event, already processed" };
       }
       throw e;
     }
@@ -637,6 +658,86 @@ export class WebhooksService {
 
         await fresh.save({ session });
       });
+
+      // publish event
+      // ... หลัง TX สำเร็จค่อย publish (อยู่นอก withTransaction)
+      try {
+        const shipmentId = String(shipment._id); // <- มีจริงจาก shipment ที่ค้นเจอ
+        const base = {
+          eventId: `order:${String(order.masterOrderId)}:store:${String(order._id)}:shipment:${shipmentId}:${dto.event}`,
+          occurredAt: new Date().toISOString(),
+          buyerId: String(order.buyerId),
+          masterOrderId: String(order.masterOrderId),
+          storeOrderId: String(order._id),
+          storeId: String(order.storeId),
+        };
+        const commonShipment = {
+          shipmentId,
+          carrier: shipment.carrier,
+          trackingNumber: shipment.trackingNumber,
+          method: shipment.method,
+          packageIds: (shipment.packageIds ?? []).map(String),
+          note: shipment.note,
+        };
+        const messageId = base.eventId; // idempotent
+
+        if (dto.event === "delivered") {
+          const payload = {
+            ...base,
+            shipment: {
+              ...commonShipment,
+              deliveredAt: (shipment.deliveredAt ?? new Date()).toISOString(),
+            },
+          };
+          await this.mq.publishTopic(
+            EXCHANGES.ORDERS_EVENTS,
+            "orders.delivered",
+            payload,
+            {
+              messageId,
+              persistent: true,
+            },
+          );
+        } else if (dto.event === "returned") {
+          const payload = {
+            ...base,
+            shipment: {
+              ...commonShipment,
+              returnedAt: (shipment.returnedAt ?? new Date()).toISOString(),
+            },
+          };
+          await this.mq.publishTopic(
+            EXCHANGES.ORDERS_EVENTS,
+            "orders.returned",
+            payload,
+            {
+              messageId,
+              persistent: true,
+            },
+          );
+        } else if (dto.event === "failed") {
+          const payload = {
+            ...base,
+            shipment: {
+              ...commonShipment,
+              failedAt: (shipment.failedAt ?? new Date()).toISOString(),
+            },
+          };
+          await this.mq.publishTopic(
+            EXCHANGES.ORDERS_EVENTS,
+            "orders.delivery_failed",
+            payload,
+            {
+              messageId,
+              persistent: true,
+            },
+          );
+        }
+      } catch (pubErr) {
+        this.logger.warn(
+          `orders.${dto.event} publish failed: ${(pubErr as Error).message}`,
+        );
+      }
     } finally {
       await session.endSession();
     }

@@ -60,6 +60,7 @@ export class StoreDetailItemDto {
     canceledQty: number;
 
     fulfillStatus: "PENDING" | "PACKED" | "SHIPPED" | "DELIVERED" | "CANCELED";
+    cover: ImageItemDto;
   }[];
   @ApiProperty() discount?: number;
   @ApiProperty() shippingFee?: number;
@@ -126,3 +127,15 @@ export class StoreDetailItemDto {
   @ApiProperty() createdAt: string;
   @ApiProperty() updatedAt: string;
 }
+
+type ImageItemDto = {
+  _id: string;
+  role: string;
+  order: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string; // ถ้าเก็บไว้
+};

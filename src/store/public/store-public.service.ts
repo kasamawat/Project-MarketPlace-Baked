@@ -13,6 +13,13 @@ import { PublicProductListQueryDto } from "src/products/public/dto/public-produc
 import { ProductListItem } from "src/products/dto/product-list-item";
 import { Sku, SkuDocument } from "src/skus/schemas/sku-schema";
 import { StoreResolverService } from "../common/store-resolver.service";
+import { Image, ImageDocument } from "src/images/schemas/image.schema";
+import { ImagesLeanRaw } from "src/products/dto/response-product.dto";
+import { ImageEntityType, ImageRole } from "src/images/image.enums";
+import {
+  StoreFollow,
+  StoreFollowDocument,
+} from "src/store-follow/schemas/store-follow.schema";
 
 @Injectable()
 export class StorePublicService {
@@ -22,6 +29,11 @@ export class StorePublicService {
     @InjectModel(Product.name)
     private readonly productModel: Model<ProductDocument>,
     @InjectModel(Sku.name) private readonly skuModel: Model<SkuDocument>,
+    @InjectModel(Image.name)
+    private readonly imageModel: Model<ImageDocument>,
+    @InjectModel(StoreFollow.name)
+    private readonly followModel: Model<StoreFollowDocument>,
+
     private readonly storeResolver: StoreResolverService,
   ) {}
 
@@ -40,11 +52,48 @@ export class StorePublicService {
     // 1) ลองหาโดย slug ก่อน (แนะนำให้ index/unique ที่ schema)
     const store = await this.storeResolver.getOrThrow(idOrSlug);
 
+    // 2) get store follow
+    const follower = await this.followModel.countDocuments({
+      storeId: store._id,
+    });
+
+    const logoDoc = await this.imageModel
+      .findOne({
+        entityType: ImageEntityType.Store,
+        entityId: store._id,
+        role: ImageRole.Logo,
+        storeId: store._id,
+        // $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      })
+      .select(
+        "_id role order publicId version width height format url createdAt",
+      )
+      .lean<ImagesLeanRaw>()
+      .exec();
+
+    if (logoDoc?.url) store.logoUrl = logoDoc.url;
+
+    if (logoDoc) {
+      store.logo = {
+        _id: String(logoDoc._id),
+        role: logoDoc.role,
+        order: logoDoc.order,
+        publicId: logoDoc.publicId,
+        version: logoDoc.version,
+        width: logoDoc.width,
+        height: logoDoc.height,
+        format: logoDoc.format,
+        url: logoDoc.url,
+      };
+    }
+
     return {
       _id: String(store._id),
       name: store.name,
       slug: String(store.slug),
       logoUrl: store.logoUrl,
+      logo: store.logo,
+      followersCount: follower,
     };
   }
 
@@ -93,9 +142,9 @@ export class StorePublicService {
     ]);
 
     // สรุปราคาระดับ SKU (ใช้ราคาของ SKU ถ้ามี; ถ้าไม่มี ใช้ defaultPrice)
-    const ids = rows.map((r) => r._id);
+    const productIds = rows.map((r) => r._id);
     const skus = await this.skuModel
-      .find({ productId: { $in: ids }, purchasable: true })
+      .find({ productId: { $in: productIds }, purchasable: true })
       .select("productId price")
       .lean()
       .exec();
@@ -139,10 +188,47 @@ export class StorePublicService {
       };
     }
 
+    // 4) get images by productIds
+    const imageDocs = await this.imageModel
+      .find({
+        entityType: "product",
+        entityId: { $in: productIds },
+        role: "cover",
+        storeId: store._id,
+      })
+      .select(
+        "_id entityId role order publicId version width height format url createdAt",
+      )
+      .lean<ImagesLeanRaw[]>()
+      .exec();
+
+    //group follow Product
+    const imagesProduct = new Map<string, ImagesLeanRaw[]>();
+    for (const img of imageDocs) {
+      const k = String(img.entityId);
+      const arr = imagesProduct.get(k) || [];
+      arr.push(img);
+      imagesProduct.set(k, arr);
+    }
+
+    const toImageMini = (d: ImagesLeanRaw) => ({
+      _id: String(d._id),
+      role: d.role,
+      order: d.order ?? 0,
+      publicId: d.publicId,
+      version: d.version,
+      width: d.width,
+      height: d.height,
+      format: d.format,
+      url:
+        d.url ??
+        `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/f_auto,q_auto/v${d.version}/${d.publicId}`,
+    });
+
     const items: PublicProductResponseDto[] = rows.map((p) => {
-      const id = String(p._id);
-      const skuPrices = priceMap[id];
-      const skuCount = countMap[id] ?? 0;
+      const productId = String(p._id);
+      const skuPrices = priceMap[productId];
+      const skuCount = countMap[productId] ?? 0;
       // ใช้ defaultPrice เป็น fallback ถ้ายังไม่มีราคาใด ๆ
       const effective = skuPrices.length
         ? skuPrices
@@ -157,8 +243,12 @@ export class StorePublicService {
       const normalizedSkuCount =
         skuCount > 0 ? skuCount : typeof p.defaultPrice === "number" ? 1 : 0;
 
+      const list = imagesProduct.get(productId) ?? [];
+      const coverDoc = list.find((x) => x.role === "cover"); // หรือ ImageRole.Cover
+      const cover = coverDoc ? toImageMini(coverDoc) : undefined;
+
       return {
-        _id: id,
+        _id: productId,
         name: p.name,
         description: p.description,
         image: p.image,
@@ -169,8 +259,7 @@ export class StorePublicService {
             : undefined,
         skuCount: normalizedSkuCount,
         store: storeMap[String(p.storeId)],
-        // storeId: String(p.storeId),
-        // (ทางเลือก) เติม store summary หากต้องการ
+        cover,
       };
     });
 

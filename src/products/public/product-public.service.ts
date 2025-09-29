@@ -14,7 +14,8 @@ import { PublicSkuResponseDto } from "./dto/public-skus-list.response.dto";
 import { SkuLeanRaw } from "../dto/response-skus.dto";
 import { Store, StoreDocument } from "src/store/schemas/store.schema";
 import { StoreLean } from "./helper/store-helper";
-import { ProductLeanRaw } from "../dto/response-product.dto";
+import { ImagesLeanRaw, ProductLeanRaw } from "../dto/response-product.dto";
+import { Image, ImageDocument } from "src/images/schemas/image.schema";
 @Injectable()
 export class ProductPublicService {
   constructor(
@@ -23,6 +24,8 @@ export class ProductPublicService {
     @InjectModel(Sku.name) private readonly skuModel: Model<SkuDocument>,
     @InjectModel(Store.name)
     private readonly storeModel: Model<StoreDocument>,
+    @InjectModel(Image.name)
+    private readonly imageModel: Model<ImageDocument>,
   ) {}
 
   async findPublicProducts(
@@ -62,10 +65,10 @@ export class ProductPublicService {
       this.productModel.countDocuments(filter),
     ]);
 
+    const productIds = rows.map((r) => r._id);
     // สรุปราคาระดับ SKU (ใช้ราคาของ SKU ถ้ามี; ถ้าไม่มี ใช้ defaultPrice)
-    const ids = rows.map((r) => r._id);
     const skus = await this.skuModel
-      .find({ productId: { $in: ids }, purchasable: true })
+      .find({ productId: { $in: productIds }, purchasable: true })
       .select("productId price")
       .lean()
       .exec();
@@ -109,10 +112,33 @@ export class ProductPublicService {
       };
     }
 
+    // pull image cover of products
+    const images = await this.imageModel
+      .find({
+        entityId: { $in: productIds },
+        storeId: { $in: storeIds },
+        entityType: "product",
+        role: "cover",
+      })
+      .select(
+        "_id entityId role order publicId version width height format url createdAt",
+      )
+      .sort({ role: 1, order: 1, createdAt: 1 }) // 'cover' มาก่อน 'gallery', แล้วเรียงตาม order
+      .lean<ImagesLeanRaw[]>()
+      .exec();
+
+    // ทำ map เร็ว ๆ: productId -> cover
+    const coverByProductId = new Map<string, ImagesLeanRaw>();
+    for (const img of images) {
+      coverByProductId.set(String(img.entityId), img);
+    }
+
     const items: PublicProductResponseDto[] = rows.map((p) => {
-      const id = String(p._id);
-      const skuPrices = priceMap[id];
-      const skuCount = countMap[id] ?? 0;
+      const productId = String(p._id);
+      const storeId = String(p.storeId);
+
+      const skuPrices = priceMap[productId];
+      const skuCount = countMap[productId] ?? 0;
       // ใช้ defaultPrice เป็น fallback ถ้ายังไม่มีราคาใด ๆ
       const effective = skuPrices.length
         ? skuPrices
@@ -127,8 +153,23 @@ export class ProductPublicService {
       const normalizedSkuCount =
         skuCount > 0 ? skuCount : typeof p.defaultPrice === "number" ? 1 : 0;
 
+      const imgProdCover = coverByProductId.get(productId);
+      const cover = imgProdCover
+        ? {
+            _id: String(imgProdCover._id),
+            role: imgProdCover.role, // เป็น string แน่นอน
+            order: imgProdCover.order,
+            publicId: imgProdCover.publicId,
+            version: imgProdCover.version,
+            width: imgProdCover.width,
+            height: imgProdCover.height,
+            format: imgProdCover.format,
+            url: imgProdCover.url,
+          }
+        : undefined;
+
       return {
-        _id: id,
+        _id: productId,
         name: p.name,
         description: p.description,
         image: p.image,
@@ -138,7 +179,8 @@ export class ProductPublicService {
             ? priceTo
             : undefined,
         skuCount: normalizedSkuCount,
-        store: storeMap[String(p.storeId)],
+        store: storeMap[storeId],
+        cover,
         // storeId: String(p.storeId),
         // (ทางเลือก) เติม store summary หากต้องการ
       };
@@ -150,7 +192,7 @@ export class ProductPublicService {
   async findProductPublicById(
     productId: string,
   ): Promise<PublicProductResponseDto> {
-    // 1) ดึงเฉพาะ published
+    // 1) product ต้องเป็น published
     const product = await this.productModel
       .findOne({ _id: new Types.ObjectId(productId), status: "published" })
       .select(
@@ -161,8 +203,8 @@ export class ProductPublicService {
 
     if (!product) throw new NotFoundException("Product not found");
 
-    // 2) ดึง SKUs ที่ซื้อได้ + ข้อมูลร้าน (ชื่อ/slug)
-    const [skus, store] = await Promise.all([
+    // 2) ดึง SKUs ที่ซื้อได้ + ข้อมูลร้าน + รูป cover ของสินค้า
+    const [skus, store, coverDoc] = await Promise.all([
       this.skuModel
         .find({ productId: product._id, purchasable: true })
         .select("productId price")
@@ -173,14 +215,26 @@ export class ProductPublicService {
         .select("_id name slug")
         .lean<StoreLean | null>()
         .exec(),
+      this.imageModel
+        .findOne({
+          entityType: "product",
+          entityId: product._id,
+          role: "cover",
+          storeId: new Types.ObjectId(String(product.storeId)),
+          // $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        })
+        .select(
+          "_id role order publicId version width height format url createdAt",
+        )
+        .lean<ImagesLeanRaw | null>()
+        .exec(),
     ]);
 
-    // 3) สรุปราคา & จำนวนตัวเลือก
+    // 3) คำนวณราคา & จำนวนตัวเลือก
     const skuPrices = skus
       .map((s) => s.price)
       .filter((n): n is number => typeof n === "number");
 
-    // ถ้าไม่มีราคาใน SKU เลย ให้ fallback เป็น defaultPrice (ถ้ามี)
     if (!skuPrices.length && typeof product.defaultPrice === "number") {
       skuPrices.push(product.defaultPrice);
     }
@@ -189,7 +243,6 @@ export class ProductPublicService {
     let priceTo = skuPrices.length ? Math.max(...skuPrices) : undefined;
     if (priceFrom != null && priceTo === priceFrom) priceTo = undefined;
 
-    // ถ้าไม่มี SKUs แต่มี defaultPrice ให้ถือว่าเลือกได้ 1 ตัวเลือก
     const skuCount =
       skus.length > 0
         ? skus.length
@@ -197,9 +250,23 @@ export class ProductPublicService {
           ? 1
           : 0;
 
-    // 4) map -> DTO
+    // 4) map -> DTO (ถ้าไม่มี cover จะไม่ส่ง field cover)
+    const cover = coverDoc
+      ? {
+          _id: String(coverDoc._id),
+          role: coverDoc.role ?? "cover",
+          order: typeof coverDoc.order === "number" ? coverDoc.order : 0,
+          publicId: coverDoc.publicId ?? "",
+          version: coverDoc.version,
+          width: coverDoc.width,
+          height: coverDoc.height,
+          format: coverDoc.format,
+          url: coverDoc.url,
+        }
+      : undefined;
+
     return {
-      _id: product._id.toHexString(),
+      _id: String(product._id),
       name: product.name,
       description: product.description,
       image: product.image,
@@ -209,26 +276,82 @@ export class ProductPublicService {
       store: store
         ? { storeId: String(store._id), name: store.name, slug: store.slug }
         : undefined,
+      cover, // optional ถ้าไม่พบ
     };
   }
 
   async findSkuByProductId(productId: string): Promise<PublicSkuResponseDto[]> {
-    const raw = await this.skuModel
+    const productIdObj = new Types.ObjectId(productId);
+
+    const product = await this.productModel
+      .findOne({ _id: productIdObj })
+      .select("_id storeId")
+      .lean<{ _id: Types.ObjectId; storeId: Types.ObjectId }>()
+      .exec();
+
+    const skus = await this.skuModel
       .find({ productId, purchasable: true })
       .select("_id skuCode attributes price image purchasable onHand reserved")
       .lean<SkuLeanRaw[]>()
       .exec();
 
-    const items = raw.map((s) => ({
-      _id: String(s._id),
-      skuCode: s.skuCode,
-      attributes: s.attributes ?? {},
-      price: typeof s.price === "number" ? s.price : undefined,
-      image: s.image,
-      purchasable: s.purchasable !== false,
-      available: Math.max(0, (s.onHand ?? 0) - (s.reserved ?? 0)),
-      currency: "THB",
-    }));
+    const skuIds = skus.map((s) => new Types.ObjectId(s._id));
+    const imageDocs = await this.imageModel
+      .find({
+        entityType: "sku", // หรือ ImageEntityType.Sku
+        entityId: { $in: skuIds }, // << สำคัญ: ใช้ $in
+        storeId: product?.storeId,
+        // $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      })
+      .select(
+        "_id entityId role order publicId version width height format url createdAt",
+      )
+      .sort({ role: 1, order: 1, createdAt: 1 }) // 'cover' มาก่อน
+      .lean<ImagesLeanRaw[]>()
+      .exec();
+
+    //group follow SKU
+    const imagesBySku = new Map<string, ImagesLeanRaw[]>();
+    for (const img of imageDocs) {
+      const k = String(img.entityId);
+      const arr = imagesBySku.get(k) || [];
+      arr.push(img);
+      imagesBySku.set(k, arr);
+    }
+
+    const toImageMini = (d: ImagesLeanRaw) => ({
+      _id: String(d._id),
+      role: d.role,
+      order: d.order ?? 0,
+      publicId: d.publicId,
+      version: d.version,
+      width: d.width,
+      height: d.height,
+      format: d.format,
+      url:
+        d.url ??
+        `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/f_auto,q_auto/v${d.version}/${d.publicId}`,
+    });
+
+    const items = skus.map((sku) => {
+      const list = imagesBySku.get(String(sku._id)) ?? [];
+      const coverDoc = list.find((x) => x.role === "cover"); // หรือ ImageRole.Cover
+      const cover = coverDoc ? toImageMini(coverDoc) : undefined;
+      const images = list.map(toImageMini);
+
+      return {
+        _id: String(sku._id),
+        skuCode: sku.skuCode,
+        attributes: sku.attributes ?? {},
+        price: typeof sku.price === "number" ? sku.price : undefined,
+        image: sku.image,
+        purchasable: sku.purchasable !== false,
+        available: Math.max(0, (sku.onHand ?? 0) - (sku.reserved ?? 0)),
+        currency: "THB",
+        cover,
+        images,
+      };
+    });
 
     return items;
   }

@@ -89,29 +89,4 @@ export class AuthService {
 
     return { user };
   }
-
-  // async update(
-  //   payload: JwtPayload,
-  //   updateData: Partial<User>,
-  // ): Promise<{ message: string }> {
-  //   const result = await this.userModel.findByIdAndUpdate(
-  //     payload.userId,
-  //     {
-  //       $set: {
-  //         firstname: updateData.firstname,
-  //         lastname: updateData.lastname,
-  //         gender: updateData.gender,
-  //         dob: updateData.dob,
-  //         editedAt: new Date(),
-  //       },
-  //     },
-  //     { new: true }, // ✅ return document หลังอัปเดต
-  //   );
-
-  //   if (!result) {
-  //     throw new NotFoundException("User not found");
-  //   }
-
-  //   return { message: "Profile updated successfully" };
-  // }
 }

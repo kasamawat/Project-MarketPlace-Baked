@@ -18,6 +18,8 @@ import { Store, StoreDocument } from "src/store/schemas/store.schema";
 import { CartItemLean, CartItemRespone } from "./helper/cart-helper";
 import { StoreLean } from "src/products/public/helper/store-helper";
 import { SkuLeanRaw } from "src/products/dto/response-skus.dto";
+import { ImagesLeanRaw } from "src/products/dto/response-product.dto";
+import { Image, ImageDocument } from "src/images/schemas/image.schema";
 
 const CART_COOKIE = "cartId";
 const CART_TTL_MIN = 7 * 24 * 60; // 7 วัน
@@ -34,6 +36,7 @@ export class CartService {
     @InjectConnection() private readonly conn: Connection,
     private readonly cartResolverService: CartResolverService,
     @InjectModel(Store.name) private readonly storeModel: Model<StoreDocument>,
+    @InjectModel(Image.name) private readonly imageModel: Model<ImageDocument>,
   ) {}
 
   async getOrCreateCart(opts: {
@@ -101,16 +104,10 @@ export class CartService {
   ): Promise<CartItemRespone[]> {
     const cartIdObj = new Types.ObjectId(cartId);
     const cart = await this.cartModel.findById(cartIdObj).lean().exec();
-    if (!cart) {
-      throw new NotFoundException("Cart not found");
-    }
+    if (!cart) throw new NotFoundException("Cart not found");
 
-    // ensure cart exists (เร็วและเบา)
-    const exists = await this.cartModel.exists({ _id: cartIdObj });
-    if (!exists) throw new NotFoundException("Cart not found");
-
-    // ดึงรายการในตะกร้า
-    const rows = await this.cartItemModel
+    // รายการในตะกร้า
+    const cartItems = await this.cartItemModel
       .find({ cartId: cartIdObj })
       .session(opts.session ?? null)
       .select(
@@ -119,12 +116,15 @@ export class CartService {
       .lean<CartItemLean[]>()
       .exec();
 
-    // เติมข้อมูลร้าน (ถ้าขอ)
+    if (!cartItems.length) return [];
+
+    // ===== stores (optional) =====
+    const storeIds = Array.from(
+      new Set(cartItems.map((r) => String(r.storeId))),
+    ).map((id) => new Types.ObjectId(id));
+
     let storeMap: Record<string, { name?: string; slug?: string }> = {};
-    if (opts.expandStore && rows.length) {
-      const storeIds = Array.from(
-        new Set(rows.map((r) => String(r.storeId))),
-      ).map((id) => new Types.ObjectId(id));
+    if (opts.expandStore) {
       const stores = await this.storeModel
         .find({ _id: { $in: storeIds } })
         .select("_id name slug")
@@ -135,13 +135,13 @@ export class CartService {
       );
     }
 
-    // เติม available/purchasable/image จาก SKU (ถ้าขอ)
+    // ===== availability (optional) =====
+    const skuIds = cartItems.map((r) => r.skuId);
     let skuExtraMap: Record<
       string,
       { available?: number; purchasable?: boolean; image?: string }
     > = {};
-    if (opts.withAvailability && rows.length) {
-      const skuIds = rows.map((r) => r.skuId);
+    if (opts.withAvailability) {
       const skus = await this.skuModel
         .find({ _id: { $in: skuIds } })
         .select("_id onHand reserved purchasable image")
@@ -153,23 +153,90 @@ export class CartService {
           {
             available: Math.max(0, (s.onHand ?? 0) - (s.reserved ?? 0)),
             purchasable: s.purchasable,
-            image: s.image,
+            image: s.image, // legacy/fallback
           },
         ]),
       );
     }
 
-    // map → CartItem[]
-    return rows.map((it): CartItemRespone => {
+    // ===== ภาพ: SKU cover (ถ้ามี) → ถ้าไม่มีใช้ Product cover =====
+    const productIds = Array.from(
+      new Set(cartItems.map((r) => String(r.productId))),
+    ).map((id) => new Types.ObjectId(id));
+
+    const imageDocs = await this.imageModel
+      .find({
+        // ขอทั้งรูปของ sku และ product ในคำสั่งเดียว
+        $or: [
+          { entityType: "sku", entityId: { $in: skuIds } },
+          { entityType: "product", entityId: { $in: productIds } },
+        ],
+        // จำกัดให้อยู่ในร้านที่เกี่ยวข้อง (ถ้าคุณต้องการ include รูป global ให้เพิ่ม $or กับ !storeId ได้)
+      })
+      .select(
+        "_id entityType entityId role order publicId version width height format url createdAt",
+      )
+      .sort({ role: 1, order: 1, createdAt: 1 }) // ให้ cover มาก่อน
+      .lean<ImagesLeanRaw[]>()
+      .exec();
+
+    const toImageMini = (d: ImagesLeanRaw) => ({
+      _id: String(d._id),
+      role: d.role,
+      order: d.order ?? 0,
+      publicId: d.publicId,
+      version: d.version,
+      width: d.width,
+      height: d.height,
+      format: d.format,
+      url:
+        d.url ??
+        `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/f_auto,q_auto/v${d.version}/${d.publicId}`,
+    });
+
+    // สร้าง map: skuId -> รูป (เอา cover ก่อน ถ้าไม่มี cover ก็เอาอันแรก)
+    const skuCoverMap = new Map<string, ReturnType<typeof toImageMini>>();
+    // สร้าง map: productId -> รูป cover (หรืออันแรก)
+    const prodCoverMap = new Map<string, ReturnType<typeof toImageMini>>();
+
+    for (const d of imageDocs) {
+      const mini = toImageMini(d);
+      const entId = String(d.entityId);
+      if (d.entityType === "sku") {
+        // ถ้ายังไม่มีให้ตั้งอันแรกไว้ก่อน แล้วถ้าเจอ cover ค่อยทับ
+        if (!skuCoverMap.has(entId)) skuCoverMap.set(entId, mini);
+        if (d.role === "cover") skuCoverMap.set(entId, mini);
+      } else if (d.entityType === "product") {
+        if (!prodCoverMap.has(entId)) prodCoverMap.set(entId, mini);
+        if (d.role === "cover") prodCoverMap.set(entId, mini);
+      }
+    }
+
+    // ===== map → response =====
+    return cartItems.map((it): CartItemRespone => {
       const sid = String(it.storeId);
       const kid = String(it.skuId);
+      const pid = String(it.productId);
       const unitPrice = it.unitPrice ?? 0;
       const qty = it.quantity ?? 1;
 
+      // เลือกรูป: SKU cover → SKU.image (legacy) → Product cover → productImage (legacy)
+      const skuCover = skuCoverMap.get(kid);
+      const prodCover = prodCoverMap.get(pid);
+
+      const finalImageUrl =
+        skuCover?.url ??
+        skuExtraMap[kid]?.image ??
+        prodCover?.url ??
+        it.productImage;
+
+      // (ถ้าต้องการคืน cover object ใน payload ด้วย)
+      const cover = skuCover ?? prodCover;
+
       return {
-        productId: String(it.productId),
+        productId: pid,
         productName: it.productName,
-        productImage: it.productImage,
+        productImage: finalImageUrl, // ใส่เป็นรูปสุดท้ายที่เลือกแล้ว
         store: { id: sid, ...storeMap[sid] },
         sku: {
           itemId: String(it._id),
@@ -177,11 +244,12 @@ export class CartService {
           attributes: it.attributes ?? {},
           price: unitPrice,
           available: skuExtraMap[kid]?.available,
-          image: skuExtraMap[kid]?.image,
+          image: finalImageUrl, // ให้ฝั่ง SKU ก็อ้างอิงภาพเดียวกัน
           purchasable: skuExtraMap[kid]?.purchasable,
         },
         quantity: qty,
-        subtotal: unitPrice * qty, // คำนวณสดเพื่อความสอดคล้อง
+        subtotal: unitPrice * qty,
+        cover, // ถ้า type ของ CartItemRespone รองรับ object cover
       };
     });
   }

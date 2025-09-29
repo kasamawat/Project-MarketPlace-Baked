@@ -44,4 +44,17 @@ class OrderItemPreviewDto {
   @ApiProperty() qty!: number;
   @ApiProperty({ required: false }) image?: string;
   @ApiProperty({ type: Object }) attributes?: Record<string, string>;
+  @ApiProperty() cover?: ImageItemDto;
 }
+
+type ImageItemDto = {
+  _id: string;
+  role: string;
+  order: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string; // ถ้าเก็บไว้
+};

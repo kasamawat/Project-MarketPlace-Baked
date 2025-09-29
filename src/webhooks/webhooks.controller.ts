@@ -2,7 +2,6 @@
 import {
   Body,
   Controller,
-  Get,
   Headers,
   HttpCode,
   Param,
@@ -17,11 +16,6 @@ import { WebhooksService } from "./webhooks.service";
 @Controller("webhooks")
 export class WebhooksController {
   constructor(private readonly svc: WebhooksService) {}
-
-  @Get("test")
-  Test() {
-    return "test";
-  }
 
   @Post("payment")
   @HttpCode(200)
@@ -65,8 +59,13 @@ export class WebhooksController {
     if (!ok) throw new UnauthorizedException("Bad signature");
 
     // 2) process (idempotent inside)
-    await this.svc.processCarrierEvent(carrierCode, parsed, idemKey, ts);
+    const result = await this.svc.processCarrierEvent(
+      carrierCode,
+      parsed,
+      idemKey,
+      ts,
+    );
 
-    return { ok: true };
+    return result ?? { ok: true };
   }
 }

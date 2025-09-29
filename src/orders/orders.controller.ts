@@ -6,9 +6,7 @@ import {
   Post,
   Req,
   Res,
-  Sse,
   UseGuards,
-  MessageEvent,
   Get,
   NotFoundException,
   Query,
@@ -23,16 +21,6 @@ import { CurrentUser } from "src/common/current-user.decorator";
 import { setCartCookie } from "src/cart/utils/cart-helper";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
 import { SseBus } from "src/realtime/sse.bus";
-import {
-  filter,
-  ignoreElements,
-  interval,
-  map,
-  merge,
-  Observable,
-  share,
-  take,
-} from "rxjs";
 import { AuthGuard } from "@nestjs/passport";
 import { ListOrdersDto } from "./dto/list-orders.dto";
 
@@ -118,44 +106,45 @@ export class OrdersController {
     return this.svc.getPayMetaForMaster(masterOrderId, userId);
   }
 
-  @Sse(":masterOrderId/stream")
-  @UseGuards(AuthGuard("jwt"))
-  async stream(
-    @Param("masterOrderId") masterOrderId: string,
-    @Res() res: Response,
-    @CurrentUser() payload: JwtPayload,
-  ): Promise<Observable<MessageEvent>> {
-    // ✅ auth/ownership check (สำคัญ)
-    const userId = payload.userId; // แล้วแต่ guard ของคุณ
-    await this.svc.userCanSeeMaster(userId, masterOrderId);
+  // ========================================= For STEAM =========================================
+  // @Sse(":masterOrderId/stream")
+  // @UseGuards(AuthGuard("jwt"))
+  // async stream(
+  //   @Param("masterOrderId") masterOrderId: string,
+  //   @Res() res: Response,
+  //   @CurrentUser() payload: JwtPayload,
+  // ): Promise<Observable<MessageEvent>> {
+  //   // ✅ auth/ownership check (สำคัญ)
+  //   const userId = payload.userId; // แล้วแต่ guard ของคุณ
+  //   await this.svc.userCanSeeMaster(userId, masterOrderId);
 
-    // ✅ ตั้ง header กัน proxy buffer
-    res.setHeader("X-Accel-Buffering", "no"); // nginx
-    res.setHeader("Cache-Control", "no-cache, no-transform");
+  //   // ✅ ตั้ง header กัน proxy buffer
+  //   res.setHeader("X-Accel-Buffering", "no"); // nginx
+  //   res.setHeader("Cache-Control", "no-cache, no-transform");
 
-    // ✅ stream สถานะของ order จาก bus (หรือ change stream)
-    // stream จาก bus (หรือ change stream) -> ห่อเป็น MessageEvent
-    const order$ = this.bus.streamOrder(masterOrderId).pipe(
-      map((payload): MessageEvent => ({ type: "order", data: payload })),
-      share(), // ไม่ต้อง stringify
-    );
+  //   // ✅ stream สถานะของ order จาก bus (หรือ change stream)
+  //   // stream จาก bus (หรือ change stream) -> ห่อเป็น MessageEvent
+  //   const order$ = this.bus.streamOrder(masterOrderId).pipe(
+  //     map((payload): MessageEvent => ({ type: "order", data: payload })),
+  //     share(), // ไม่ต้อง stringify
+  //   );
 
-    // when find last status -> close stream
-    const terminal$ = order$.pipe(
-      filter((e) => {
-        if (!e?.data) return false;
-        const d = typeof e.data === "string" ? { status: e.data } : e.data;
-        const s = (d as Record<string, string>).status as string | undefined;
-        return s === "paid" || s === "canceled" || s === "expired";
-      }),
-      take(1),
-    );
+  //   // when find last status -> close stream
+  //   const terminal$ = order$.pipe(
+  //     filter((e) => {
+  //       if (!e?.data) return false;
+  //       const d = typeof e.data === "string" ? { status: e.data } : e.data;
+  //       const s = (d as Record<string, string>).status as string | undefined;
+  //       return s === "paid" || s === "canceled" || s === "expired";
+  //     }),
+  //     take(1),
+  //   );
 
-    // ✅ ส่ง heartbeat ทุก 15s กัน idle timeout
-    const heartbeat$ = interval(15000).pipe(
-      map((): MessageEvent => ({ type: "keepalive", data: "1" })),
-    );
-    // ส่งรวม
-    return merge(heartbeat$, order$, terminal$.pipe(ignoreElements()));
-  }
+  //   // ✅ ส่ง heartbeat ทุก 15s กัน idle timeout
+  //   const heartbeat$ = interval(15000).pipe(
+  //     map((): MessageEvent => ({ type: "keepalive", data: "1" })),
+  //   );
+  //   // ส่งรวม
+  //   return merge(heartbeat$, order$, terminal$.pipe(ignoreElements()));
+  // }
 }

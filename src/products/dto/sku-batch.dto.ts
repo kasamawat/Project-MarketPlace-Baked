@@ -37,6 +37,12 @@ export class SkuUpdateDto extends SkuCreateDto {
   _id!: string;
 }
 
+export class SkuImageMeta {
+  uid!: string; // ลำดับไฟล์ใน FormData (0-based)
+  skuId?: string; // ถ้าเป็น SKU เดิม
+  key?: string; // ถ้าเป็น SKU ใหม่: normalizedAttributes เช่น "Color=Red|Size=M"
+}
+
 export class SkuBatchSyncDto {
   @IsOptional()
   @IsArray()

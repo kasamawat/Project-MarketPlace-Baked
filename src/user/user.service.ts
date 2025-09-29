@@ -5,34 +5,143 @@ import { InjectModel } from "@nestjs/mongoose";
 import { JwtPayload } from "src/auth/types/jwt-payload.interface";
 import { AddressInfoResponseDto } from "./dto/user-address.dto";
 import { AddressInfoDto } from "./dto/address-info.dto";
+import { UpdateUserInfoDto } from "./dto/user-update-info.dto";
+import { ImagesService } from "src/images/images.service";
+import { OutboxService } from "src/outbox/outbox.service";
+import { CloudinaryService } from "src/uploads/uploads.service";
+import { Image, ImageDocument } from "src/images/schemas/image.schema";
+import { ImageEntityType, ImageRole } from "src/images/image.enums";
+import { ImagesLeanRaw } from "src/products/dto/response-product.dto";
+import { plainToInstance } from "class-transformer";
+import { UserInfoDto } from "./dto/user-info.dto";
 
 @Injectable()
 export class UserService {
-  constructor(@InjectModel(User.name) private userModel: Model<UserDocument>) {}
+  constructor(
+    @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Image.name)
+    private readonly imageModel: Model<ImageDocument>,
+
+    private readonly cloud: CloudinaryService,
+    private readonly imagesService: ImagesService,
+    private readonly outboxService: OutboxService,
+  ) {}
+
+  async getProfile(payload: JwtPayload): Promise<UserInfoDto> {
+    const userIdObj = new Types.ObjectId(payload.userId);
+
+    const [user, avatarDoc] = await Promise.all([
+      this.userModel.findOne({ _id: userIdObj }).lean(),
+      this.imageModel
+        .findOne({
+          entityType: ImageEntityType.User,
+          entityId: userIdObj,
+          role: ImageRole.Avatar,
+          // $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        })
+        .select(
+          "_id role order publicId version width height format url createdAt",
+        )
+        .lean<ImagesLeanRaw>()
+        .exec(),
+    ]);
+    if (!user) {
+      throw new NotFoundException("User not found");
+    }
+
+    const dto = plainToInstance(UserInfoDto, user, {
+      excludeExtraneousValues: true,
+    });
+
+    if (avatarDoc?.url) dto.avatarUrl = avatarDoc.url;
+
+    if (avatarDoc) {
+      dto.avatar = {
+        _id: String(avatarDoc._id),
+        role: avatarDoc.role,
+        order: avatarDoc.order,
+        publicId: avatarDoc.publicId,
+        version: avatarDoc.version,
+        width: avatarDoc.width,
+        height: avatarDoc.height,
+        format: avatarDoc.format,
+        url: avatarDoc.url,
+      };
+    }
+
+    return dto;
+  }
 
   async updateUserInfo(
     payload: JwtPayload,
-    updateData: Partial<User>,
-  ): Promise<{ message: string }> {
+    updateData: UpdateUserInfoDto,
+    avatar?: Express.Multer.File,
+  ): Promise<UserInfoDto & { ok: true }> {
+    const userIdObj = new Types.ObjectId(payload.userId);
+
+    const setPatch: Record<string, any> = { editedAt: new Date() };
+    if (updateData.firstname !== undefined)
+      setPatch.firstname = updateData.firstname;
+    if (updateData.lastname !== undefined)
+      setPatch.lastname = updateData.lastname;
+    if (updateData.gender !== undefined) setPatch.gender = updateData.gender;
+    if (updateData.dob !== undefined) setPatch.dob = updateData.dob;
+
     const result = await this.userModel.findByIdAndUpdate(
-      payload.userId,
-      {
-        $set: {
-          firstname: updateData.firstname,
-          lastname: updateData.lastname,
-          gender: updateData.gender,
-          dob: updateData.dob,
-          editedAt: new Date(),
-        },
-      },
-      { new: true }, // ✅ return document หลังอัปเดต
+      userIdObj,
+      { $set: setPatch },
+      { new: true },
     );
 
     if (!result) {
       throw new NotFoundException("User not found");
     }
 
-    return { message: "Profile updated successfully" };
+    if (avatar) {
+      const prevPublicId = `users/${String(payload.userId)}/avatar`;
+
+      // 1) upload -> temp
+      const temp = await this.cloud.uploadTempImage(
+        avatar.buffer,
+        String(payload.userId),
+      );
+
+      // 2) rename temp -> final (ทับของเดิมด้วย public_id เดิม)
+      await this.cloud.rename(temp.public_id, prevPublicId);
+
+      // 3) final URL พร้อม version ใหม่
+      const finalUrl = `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload/f_auto,q_auto/v${temp.version}/${prevPublicId}`;
+
+      // 4) อัปเดต images table (ลบ metadata เก่า role:Logo ทิ้ง แล้ว attach ใหม่)
+      await this.imagesService
+        .detachByEntityRole(
+          ImageEntityType.User,
+          String(payload.userId),
+          ImageRole.Avatar,
+          payload,
+          { deleteOnCloud: false },
+        )
+        .catch(() => {});
+
+      await this.imagesService.attach(
+        {
+          entityType: ImageEntityType.User,
+          entityId: String(payload.userId),
+          role: ImageRole.Avatar,
+          publicId: prevPublicId,
+          url: finalUrl,
+          version: temp.version,
+          width: temp.width,
+          height: temp.height,
+          format: temp.format,
+          bytes: temp.bytes,
+        },
+        payload,
+      );
+    }
+
+    const proFile = await this.getProfile(payload);
+    return { ...proFile, ok: true };
   }
 
   async getAddresses(payload: JwtPayload): Promise<AddressInfoResponseDto[]> {

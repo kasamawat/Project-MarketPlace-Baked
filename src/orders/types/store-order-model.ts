@@ -45,6 +45,7 @@ interface FulfillmentPackage {
 }
 
 interface FulfillmentShipment {
+  _id: Types.ObjectId;
   carrier: string; // TH-EMS, TH-KERRY, ...
   trackingNumber: string;
   method?: "DROP_OFF" | "PICKUP";

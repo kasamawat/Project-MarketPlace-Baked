@@ -1,15 +1,21 @@
 import { Types } from "mongoose";
 import { MasterStatus, StoreStatus } from "../schemas/shared.subdocs";
 
+type ImageItemDto = {
+  _id: string;
+  role: string;
+  order: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string; // ถ้าเก็บไว้
+};
+
 export type BuyerOrderListItem = {
   masterOrderId: string;
   createdAt: string;
-  itemsPreview: {
-    name: string;
-    qty: number;
-    image?: string;
-    attributes?: Record<string, string>;
-  }[];
   itemsCount: number;
   itemsTotal: number;
   currency: string;
@@ -62,6 +68,7 @@ export type storesSummary = {
     image?: string;
     attributes?: Record<string, string>;
     fulfillStatus?: FulfillStatus;
+    cover: ImageItemDto;
   }[];
 };
 
@@ -69,12 +76,6 @@ export type BuyerWithAggRow = {
   _id: Types.ObjectId;
   createdAt: Date;
   currency: string;
-  itemsPreview: {
-    name: string;
-    qty: number;
-    image?: string;
-    attributes: Record<string, string>;
-  }[];
   itemsCount: number;
   itemsTotal: number;
   reservationExpiresAt?: Date;
@@ -106,6 +107,7 @@ type StoreOrderItemView = {
   subtotal: number;
   fulfillStatus: FulfillStatus;
   attributes?: Record<string, string>;
+  cover: ImageItemDto;
 };
 
 type StoreOrderAgg = {
@@ -159,7 +161,8 @@ export type BuyerDetailFacet = {
 type StoreOrderBriefOut = {
   storeOrderId: string;
   storeId: string;
-  buyerStatus: StoreOrderAgg["buyerStatus"];
+  buyerStatus: MasterStatus;
+  storeStatus: StoreStatus;
   pricing: { itemsTotal: number; grandTotal: number };
   items: StoreOrderItemView[];
 };

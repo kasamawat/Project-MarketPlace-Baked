@@ -26,6 +26,15 @@ export function safeJsonParse(s: string): unknown {
     return s;
   }
 }
+// payload ของ order.delivered
+export function isOrderDeliveredPayload(x: {
+  orderId: string;
+  userId: string;
+  storeId: string;
+  deliveredAt: string;
+}) {
+  return x && typeof x.orderId === "string" && typeof x.userId === "string";
+}
 
 /** ดึง masterOrderId จาก payload ที่เป็น object */
 export function getMasterOrderIdFromPayload(payload: unknown): string | null {

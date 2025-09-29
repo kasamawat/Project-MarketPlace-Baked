@@ -2,6 +2,18 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Expose, Transform } from "class-transformer";
 
+export interface PublicProductImageDto {
+  _id: string;
+  role: string;
+  order?: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string;
+}
+
 // helper ให้แปลง attributes ให้ปลอดภัย
 function toStringRecord(v: unknown): Record<string, string> {
   if (v && typeof v === "object" && !Array.isArray(v)) {
@@ -63,6 +75,9 @@ export class PublicSkuResponseDto {
   @ApiPropertyOptional({ example: "THB" })
   @Expose()
   currency?: string;
+
+  @ApiProperty() @Expose() cover?: PublicProductImageDto;
+  @ApiProperty() @Expose() images?: PublicProductImageDto[];
 }
 
 // ถ้าจะรองรับการแบ่งหน้าในอนาคต ใส่ wrapper แบบนี้

@@ -8,6 +8,7 @@ import { Store, StoreSchema } from "src/store/schemas/store.schema";
 import { CartItem, CartItemSchema } from "./schemas/cart-item.schema";
 import { Cart, CartSchema } from "./schemas/cart.schema";
 import { CartCommonModule } from "./common/cart-common.module";
+import { Image, ImageSchema } from "src/images/schemas/image.schema";
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { CartCommonModule } from "./common/cart-common.module";
     MongooseModule.forFeature([{ name: Sku.name, schema: SkuSchema }]),
     MongooseModule.forFeature([{ name: Product.name, schema: ProductSchema }]),
     MongooseModule.forFeature([{ name: Store.name, schema: StoreSchema }]),
+    MongooseModule.forFeature([{ name: Image.name, schema: ImageSchema }]),
     CartCommonModule,
   ],
   controllers: [CartController],

@@ -1,6 +1,18 @@
 import { Types } from "mongoose";
 import { MasterStatus, StoreStatus } from "../schemas/shared.subdocs";
 
+type ImageItemDto = {
+  _id: string;
+  role: string;
+  order: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string; // ถ้าเก็บไว้
+};
+
 type StoreItemPreview = {
   name: string;
   qty: number;
@@ -13,6 +25,7 @@ type StoreItemPreview = {
     | "DELIVERED"
     | "CANCELED"
     | "RETURNED";
+  cover: ImageItemDto;
 };
 
 type FulfillmentStatus =

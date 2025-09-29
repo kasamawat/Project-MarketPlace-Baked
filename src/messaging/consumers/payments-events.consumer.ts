@@ -14,8 +14,8 @@ import type {
   ChannelWrapper,
 } from "amqp-connection-manager";
 
-import { MQ_CONNECTION } from "./mq.tokens";
-import { bindPaymentsTopology, QUEUES } from "./mq.topology";
+import { MQ_CONNECTION } from "../mq.tokens";
+import { bindPaymentsTopology, QUEUES } from "../mq.topology";
 import {
   // ปรับ helper ให้รองรับ masterOrderId
   isCanceledPayload,
@@ -26,7 +26,7 @@ import {
   safeJsonParse,
   // 👉 เพิ่ม helper ใหม่ (ดูโน้ตท้ายไฟล์)
   getMasterOrderIdFromPayload,
-} from "./helper/mq-helper";
+} from "../helper/mq-helper";
 import { SseBus } from "src/realtime/sse.bus";
 
 const MAX_RETRIES = 5;

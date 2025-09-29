@@ -2,6 +2,18 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Expose } from "class-transformer";
 
+export interface PublicProductImageDto {
+  _id: string;
+  role: string;
+  order?: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string;
+}
+
 export class PublicProductResponseDto {
   @ApiProperty() @Expose() _id!: string;
   @ApiProperty() @Expose() name!: string;
@@ -12,6 +24,8 @@ export class PublicProductResponseDto {
   @ApiPropertyOptional() @Expose() priceTo?: number;
 
   @ApiProperty() @Expose() skuCount!: number;
+
+  @ApiProperty() @Expose() cover?: PublicProductImageDto;
 
   @ApiProperty() @Expose() storeId?: string;
   @ApiProperty()

@@ -15,6 +15,7 @@ import {
   MasterOrder,
   MasterOrderDocument,
 } from "./schemas/master-order.schema";
+import { runTxnWithRetry } from "./utils/orders-expiry-helper";
 
 const BATCH = Number(process.env.ORDER_EXPIRY_BATCH || 50);
 
@@ -32,92 +33,147 @@ export class OrdersExpiryReaper {
     @Inject(MQ_PUBLISHER) private readonly mq: MqPublisher,
   ) {}
 
-  @Cron(CronExpression.EVERY_10_SECONDS) // ปรับเป็น EVERY_MINUTE ในโปรดักชัน
+  @Cron(CronExpression.EVERY_10_SECONDS)
   async sweep() {
     const now = new Date();
     let processed = 0;
-    let picked = 0;
 
-    // ดึงเป็นก้อน ๆ จนกว่าจะหมดในรอบนี้
-    do {
+    while (true) {
       const list = await this.masterOrderModel
         .find({
           status: "pending_payment",
           reservationExpiresAt: { $lte: now },
+          $or: [{ expiring: { $exists: false } }, { expiring: false }],
         })
-        .select("_id paymentIntentId paymentProvider") // ใช้ provider ตัดสินใจยกเลิก PI
+        .select(
+          "_id buyerId paymentIntentId paymentProvider reservationExpiresAt currency pricing",
+        )
         .sort({ reservationExpiresAt: 1 })
         .limit(BATCH)
         .lean<
           {
             _id: Types.ObjectId;
+            buyerId: Types.ObjectId;
             paymentIntentId?: string;
             paymentProvider?: string;
+            reservationExpiresAt: Date;
+            currency: string;
+            pricing: Record<string, string>;
           }[]
-        >()
-        .exec();
+        >();
 
-      picked = list.length;
-      if (!picked) break;
+      if (!list.length) break;
 
       for (const it of list) {
         const masterOrderId = String(it._id);
-        const session = await this.conn.startSession();
-        try {
-          await session.withTransaction(async () => {
-            // 1) คืน stock ที่จองไว้ทั้งหมดของ master (idempotent)
-            await this.inventory.releaseByMaster(masterOrderId, session);
 
-            // 2) mark expired (เฉพาะยัง pending_payment; ถ้าแข่งกันจะ no-op)
+        // 0) claim กันชนกันก่อน
+        const claimed = await this.masterOrderModel
+          .findOneAndUpdate(
+            {
+              _id: it._id,
+              status: "pending_payment",
+              reservationExpiresAt: { $lte: now },
+              expiring: { $ne: true },
+            },
+            { $set: { expiring: true, expiringAt: now } },
+            { new: true },
+          )
+          .lean();
+
+        if (!claimed) continue; // มีคนอื่นทำไปแล้ว หรือสถานะเปลี่ยน
+
+        try {
+          // 1) ทำใน TX และใช้ markMasterExpired (อัปเดต master + store + release stock)
+          const updated = await runTxnWithRetry(this.conn, async (session) => {
+            // เปลี่ยนให้ markMasterExpired คืน boolean ถ้าสะดวก (ดูหมายเหตุด้านล่าง)
+            const before = await this.masterOrderModel
+              .findOne({ _id: it._id }, { status: 1 }, { session })
+              .lean();
+
             await this.orders.markMasterExpired(
               masterOrderId,
-              { reason: "payment_timeout" },
+              { reason: "payment_timeout", expiredAt: now },
               session,
+            );
+
+            const after = await this.masterOrderModel
+              .findOne({ _id: it._id }, { status: 1 }, { session })
+              .lean();
+
+            return (
+              before?.status === "pending_payment" &&
+              after?.status === "expired"
             );
           });
 
-          // 3) ยกเลิก PaymentIntent (นอกรอบ TX; เงียบ ๆ ได้)
-          if (
-            it.paymentIntentId &&
-            (!it.paymentProvider ||
-              it.paymentProvider.toLowerCase() === "stripe")
-          ) {
-            try {
-              await this.stripe.paymentIntents.cancel(it.paymentIntentId, {
-                cancellation_reason: "abandoned",
-              });
-            } catch {
-              /* ignore cancel errors */
+          // 2) นอก TX: ยกเลิก PI (ถ้ามี) + publish เฉพาะเมื่อเปลี่ยนสถานะจริง
+          if (updated) {
+            if (
+              it.paymentIntentId &&
+              (!it.paymentProvider ||
+                it.paymentProvider.toLowerCase() === "stripe")
+            ) {
+              try {
+                await this.stripe.paymentIntents.cancel(it.paymentIntentId, {
+                  cancellation_reason: "abandoned",
+                });
+              } catch {
+                /* ignore */
+              }
             }
+
+            // publish to exchange payments.event
+            await this.mq.publishTopic(
+              EXCHANGES.PAYMENTS_EVENTS,
+              "payments.canceled",
+              {
+                masterOrderId,
+                paymentIntentId: it.paymentIntentId,
+                reason: "payment_timeout",
+                at: new Date().toISOString(),
+              },
+              {
+                messageId: `master:${masterOrderId}:timeout:${Date.now()}`,
+                persistent: true,
+              },
+            );
+
+            const evt = {
+              eventId: `order:${masterOrderId}:payment_expired`,
+              buyerId: String(it.buyerId),
+              masterOrderId: masterOrderId,
+              orderNumber: masterOrderId,
+              total: it.pricing.grandTotal,
+              occurredAt: new Date().toISOString(),
+              currency: it.currency || "THB",
+              paymentMethod: "card",
+              expiresAt: it.reservationExpiresAt, // หรือใช้ reservationExpiresAt เดิม
+            };
+            // publish to exchange orders.events
+            await this.mq.publishTopic(
+              EXCHANGES.ORDERS_EVENTS,
+              "orders.payment_expired",
+              evt,
+              { messageId: evt.eventId, persistent: true },
+            );
+
+            processed++;
           }
-
-          // 4) แจ้ง MQ → ใช้ canceled พร้อม reason=payment_timeout
-          await this.mq.publishTopic(
-            EXCHANGES.PAYMENTS_EVENTS,
-            "payments.canceled",
-            {
-              masterOrderId,
-              paymentIntentId: it.paymentIntentId,
-              reason: "payment_timeout",
-              at: new Date().toISOString(),
-            },
-            {
-              messageId: `master:${masterOrderId}:timeout:${Date.now()}`,
-              persistent: true,
-            },
-          );
-
-          processed++;
         } catch (err) {
           this.logger.error(
             `expire ${masterOrderId} failed: ${(err as Error).message}`,
           );
-          // ไม่ต้องทำอะไรเพิ่ม: ทั้ง release & markMasterExpired เป็น idempotent และเราใช้ TX แล้ว
-        } finally {
-          await session.endSession();
+          // ปลด claim เพื่อให้รอบถัดไปหยิบได้
+          await this.masterOrderModel
+            .updateOne(
+              { _id: it._id, expiring: true },
+              { $unset: { expiring: 1, expiringAt: 1 } },
+            )
+            .catch(() => {});
         }
       }
-    } while (picked === BATCH);
+    }
 
     this.logger.log(`expired masters processed: ${processed}`);
   }

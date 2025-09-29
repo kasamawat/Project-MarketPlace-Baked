@@ -6,6 +6,7 @@ import { Sku, SkuSchema } from "src/skus/schemas/sku-schema";
 import { ProductPublicController } from "./product-public.controller";
 import { ProductPublicService } from "./product-public.service";
 import { Store, StoreSchema } from "src/store/schemas/store.schema";
+import { Image, ImageSchema } from "src/images/schemas/image.schema";
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { Store, StoreSchema } from "src/store/schemas/store.schema";
       { name: Product.name, schema: ProductSchema },
       { name: Sku.name, schema: SkuSchema },
       { name: Store.name, schema: StoreSchema },
+      { name: Image.name, schema: ImageSchema },
     ]),
   ],
   controllers: [ProductPublicController],

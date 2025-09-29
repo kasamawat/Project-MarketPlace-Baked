@@ -24,6 +24,18 @@ export type CartSkuRef = {
   purchasable?: boolean;
 };
 
+interface CartImageDto {
+  _id: string;
+  role: string;
+  order?: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string;
+}
+
 export type CartItemRespone = {
   productId: string;
   productName: string;
@@ -32,4 +44,5 @@ export type CartItemRespone = {
   sku: CartSkuRef;
   quantity: number;
   subtotal: number;
+  cover?: CartImageDto;
 };

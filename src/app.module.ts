@@ -21,6 +21,17 @@ import { RealtimeModule } from "./realtime/realtime.module";
 import { ScheduleModule } from "@nestjs/schedule";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { WebhooksController } from "./webhooks/webhooks.controller";
+import { ToolsModule } from "./tools/tools.module";
+import { NotificationModule } from "./notification/notification.module";
+import { UploadsController } from "./uploads/uploads.controller";
+import { CloudinaryModule } from "./uploads/uploads.module";
+import { ImagesController } from "./images/images.controller";
+import { ImagesModule } from "./images/images.module";
+import { SearchController } from "./search/search.controller";
+import { SearchModule } from "./search/search.module";
+import { OutboxModule } from "./outbox/outbox.module";
+import { StoreFollowModule } from "./store-follow/store-follow.module";
+import { ReviewsModule } from './reviews/reviews.module';
 
 @Module({
   imports: [
@@ -44,12 +55,24 @@ import { WebhooksController } from "./webhooks/webhooks.controller";
     MessagingModule,
     RealtimeModule,
     WebhooksModule,
+    ToolsModule,
+    NotificationModule,
+    CloudinaryModule,
+    ImagesModule,
+    SearchModule,
+    OutboxModule,
+    StoreFollowModule,
+    ReviewsModule,
   ],
   controllers: [
     AppController,
     OrdersController,
     PaymentsController,
     WebhooksController,
+    UploadsController,
+    ImagesController,
+    SearchController,
+    // OutboxController,
   ],
   providers: [AppService],
 })

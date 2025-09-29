@@ -91,6 +91,18 @@ interface FulfillmentInfo {
   shippedAt?: Date;
 }
 
+type ImageItemDto = {
+  _id: string;
+  role: string;
+  order: number;
+  publicId: string;
+  version?: number;
+  width?: number;
+  height?: number;
+  format?: string;
+  url?: string; // ถ้าเก็บไว้
+};
+
 interface StoreOrderItemLite {
   productId: string;
   skuId?: string;
@@ -107,6 +119,7 @@ interface StoreOrderItemLite {
   canceledQty: number;
 
   fulfillStatus: "PENDING" | "PACKED" | "SHIPPED" | "DELIVERED" | "CANCELED";
+  cover: ImageItemDto;
 }
 
 export interface StoreOrderDetail {
